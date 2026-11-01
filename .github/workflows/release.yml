@@ -1,0 +1,54 @@
+# Builds the Windows installer and portable zip when a version tag such as
+# v0.1.0 is pushed, and puts them on a draft GitHub Release. Nothing is public
+# until the draft is published by hand. macOS and Linux packages come later.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check the tag matches the version in Cargo.toml
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          if ("v$version" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} doesn't match version $version in Cargo.toml." }
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Check the size target (under 5 MB)
+        run: |
+          $size = (Get-Item target/release/peregrineview.exe).Length
+          "peregrineview.exe is $([math]::Round($size / 1MB, 2)) MB"
+          if ($size -ge 5MB) { throw "The release exe is over the 5 MB target." }
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --version 0.11.8 --locked
+
+      - name: Make the installer
+        run: cargo packager --release
+
+      - name: Make the portable zip
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          New-Item -ItemType Directory -Force portable | Out-Null
+          Copy-Item target/release/peregrineview.exe portable/PeregrineView.exe
+          Compress-Archive portable/PeregrineView.exe "dist/peregrineview_${version}_x64-portable.zip"
+
+      - name: Upload to a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" --draft --title "PeregrineView ${{ github.ref_name }}" --generate-notes (Get-ChildItem dist/*.exe, dist/*.zip).FullName

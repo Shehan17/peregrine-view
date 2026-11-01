@@ -14,6 +14,9 @@ cargo test                                    # all unit tests
 cargo test natural_order                      # one test, by name
 cargo test platform::linux                    # one module's tests
 cargo clippy --all-targets                    # must stay warning-free
+cargo run --release --example large_svg       # writes test-svgs/large-map.svg (6 MB, git-ignored) for speed checks
+cargo packager --release                      # Windows installer in dist/ (once: cargo install cargo-packager --locked)
+powershell -File assets/icons/make-ico.ps1    # rebuild assets/icons/icon.ico after changing assets/App_Icon.png
 ```
 
 The platform code is checked from any OS by cross-target type-checking (`rustup target add aarch64-apple-darwin x86_64-unknown-linux-gnu` once):
@@ -25,7 +28,7 @@ cargo clippy --target x86_64-unknown-linux-gnu --all-targets
 
 Do not run `cargo fmt`: the code is not rustfmt-formatted (it uses longer lines and one-line `let ... else { return };`), and running it would rewrite every file.
 
-Release builds on Windows use `windows_subsystem = "windows"`, so stderr is only visible in debug builds. The debug log prints `window created …` and `first picture … after start` timings, plus per-render and per-present times. Use these to check against the SPEC targets (first window under 100 ms, first picture under 50 ms in release).
+Release builds on Windows use `windows_subsystem = "windows"`, so stderr is only visible in debug builds. The debug log prints `window created …` and `first picture … after start` timings, plus per-render and per-present times. Use these to check against the SPEC targets (first window under 100 ms, first picture under 50 ms in release). To see the log of a release build, read stderr through a pipe (e.g. .NET `Process` with `RedirectStandardError`): redirecting it to a file costs about 3 ms per line on Windows and makes startup look much slower than it is. Most of the time to first window is Windows creating the window; the app reaches `create_window` in a few milliseconds.
 
 ## Architecture
 
@@ -46,7 +49,7 @@ Release builds on Windows use `windows_subsystem = "windows"`, so stderr is only
 
 **Platform code.** Platform code lives in `src/platform/`. `macos.rs` adds `application:openURLs:` to winit's NSApplication delegate class at runtime, because Finder sends files as Apple Events, not in argv. `windows.rs` lists the apps for a file type and opens the file in one (`SHAssocEnumHandlers` / `IAssocHandler::Invoke`, COM vtables declared by hand since there is no COM crate) on a long-lived STA `shell` thread, and shows Windows' own chooser (`SHOpenWithDialog`) for "Other app…". This drives the top-right "Open in" button and its menu, which `ui.rs` draws on every OS; `App::editable_path` keeps it hidden off Windows. The last app picked is saved as `editor=`/`editor_name=` in the settings file. `linux.rs` reads the light/dark preference through `dbus-send` (winit reports no theme on Linux) and is also compiled for tests on every OS. Other per-OS bits are inline `#[cfg]` in `app.rs`: the Windows taskbar icon, the Linux Wayland app ID / X11 WM_CLASS `peregrineview`, and the Cmd-vs-Ctrl primary modifier. Known winit 0.30 gaps: no drag and drop on Wayland, no pinch gesture on Linux.
 
-**Packaging.** File associations and the bundle identifier live in `[package.metadata.packager]` in `Cargo.toml`, for cargo-packager (Milestone 8). macOS-only dependencies deliberately reuse the objc2 0.6 / objc2-foundation 0.3 / objc2-app-kit 0.3 versions that rfd, arboard and softbuffer already pull in.
+**Packaging and release.** Only Windows is packaged for now. `[package.metadata.packager]` in `Cargo.toml` holds the cargo-packager settings: an NSIS installer for the current user (no admin prompt) that registers `.svg`/`.svgz` from the `file-associations` entries. It uses `assets/installer.nsi`, a copy of cargo-packager 0.11.8's template whose changes are listed at its top and marked `PeregrineView` (the stock uninstaller removes no file associations). Keep it in step with the cargo-packager version pinned in `release.yml`, and in a handlebars template write `\\{{` after a backslash, since `\{{` prints the braces literally. The `identifier` is a placeholder and must be final before the first macOS release, since macOS treats a changed identifier as a different app. `build.rs` embeds `assets/icons/icon.ico` and version info (the "PeregrineView" name that Task Manager and "Open with" show) into the Windows exe through the build-only `embed-resource` crate. The window icon at runtime still comes from `App_Icon.png` (`icon.rs`). `.github/workflows/ci.yml` runs tests and clippy on Windows, macOS and Linux on every push. `release.yml` runs on a `v*` tag that must match the Cargo.toml version, checks the 5 MB size target, and uploads the installer and a portable zip to a draft GitHub Release. macOS-only dependencies deliberately reuse the objc2 0.6 / objc2-foundation 0.3 / objc2-app-kit 0.3 versions that rfd, arboard and softbuffer already pull in.
 
 ## Conventions
 

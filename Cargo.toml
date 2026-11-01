@@ -24,26 +24,46 @@ objc2 = "0.6.3"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSURL"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder"] }
 
-# File associations, used by cargo-packager when packaging: the Windows
-# installer registers the extensions, the macOS Info.plist declares them as
-# document types, and the Linux .desktop file lists the MIME types.
+# Puts the app icon and version info into the Windows exe (see build.rs).
+# Build-time only: it adds nothing to the app itself.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0"
+
+# Packaging with cargo-packager: `cargo packager --release` makes the Windows
+# installer in dist/. Only Windows is packaged for now; macOS and Linux come
+# later. The file associations make the Windows installer register the
+# extensions, the macOS Info.plist declare them as document types, and the
+# Linux .desktop file list the MIME types.
 [package.metadata.packager]
 product-name = "PeregrineView"
+# A placeholder. It must be final before the first macOS release, because
+# macOS treats an app with a changed identifier as a different app.
 identifier = "com.peregrineview.viewer"
+before-packaging-command = "cargo build --release --locked"
+out-dir = "dist"
+formats = ["nsis"]
+icons = ["assets/icons/icon.ico", "assets/App_Icon.png"]
 
+[package.metadata.packager.nsis]
+# The default template with a fixed uninstaller; see the top of the file.
+template = "assets/installer.nsi"
+installer-icon = "assets/icons/icon.ico"
+
+# `name` is the Windows file type id (ProgID) in the registry; `description`
+# is what Explorer shows as the file's type.
 [[package.metadata.packager.file-associations]]
 extensions = ["svg"]
 mime-type = "image/svg+xml"
-name = "SVG image"
+name = "PeregrineView.svg"
 description = "SVG image"
-role = "Viewer"
+role = "viewer"
 
 [[package.metadata.packager.file-associations]]
 extensions = ["svgz"]
 mime-type = "image/svg+xml-compressed"
-name = "Compressed SVG image"
+name = "PeregrineView.svgz"
 description = "Compressed SVG image"
-role = "Viewer"
+role = "viewer"
 
 [profile.release]
 opt-level = 3

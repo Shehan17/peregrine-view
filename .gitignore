@@ -1,1 +1,4 @@
 /target
+/dist
+# Made by `cargo run --release --example large_svg`.
+/test-svgs/large-map.svg

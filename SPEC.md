@@ -233,4 +233,4 @@ Keep a `test-svgs/` folder with real files that cover the hard cases: icons, a l
 | macOS | `.app` bundle in a `.dmg` | `Info.plist` declares SVG document types |
 | Linux | AppImage and `.deb` | `.desktop` file with `image/svg+xml` MIME type |
 
-Use `cargo-packager` (or `cargo-bundle`) to make the packages. GitHub Actions builds all three on every release tag. Without an Apple Developer account, macOS users will see a security warning on first open; signing can come later.
+Use `cargo-packager` (or `cargo-bundle`) to make the packages. GitHub Actions builds all three on every release tag. Version 0.1.0 ships the Windows packages only; GitHub Actions still runs the tests on all three systems, and the macOS and Linux packages come later. Without an Apple Developer account, macOS users will see a security warning on first open; signing can come later.
