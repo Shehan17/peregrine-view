@@ -17,6 +17,34 @@ ab_glyph = { version = "0.2.32", default-features = false, features = ["std"] }
 arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
 notify = "8.2"
 
+# Receives files opened from Finder. These are the versions rfd, arboard and
+# softbuffer already use, so they add no new code to build.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.3"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder"] }
+
+# File associations, used by cargo-packager when packaging: the Windows
+# installer registers the extensions, the macOS Info.plist declares them as
+# document types, and the Linux .desktop file lists the MIME types.
+[package.metadata.packager]
+product-name = "PeregrineView"
+identifier = "com.peregrineview.viewer"
+
+[[package.metadata.packager.file-associations]]
+extensions = ["svg"]
+mime-type = "image/svg+xml"
+name = "SVG image"
+description = "SVG image"
+role = "Viewer"
+
+[[package.metadata.packager.file-associations]]
+extensions = ["svgz"]
+mime-type = "image/svg+xml-compressed"
+name = "Compressed SVG image"
+description = "Compressed SVG image"
+role = "Viewer"
+
 [profile.release]
 opt-level = 3
 lto = true

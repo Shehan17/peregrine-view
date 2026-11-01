@@ -4,6 +4,7 @@ mod app;
 mod icon;
 mod loader;
 mod nav;
+mod platform;
 mod render;
 mod settings;
 mod text;
@@ -29,6 +30,12 @@ pub enum AppEvent {
     Rendered(render::Frame),
     /// The Open dialog closed, with the chosen file if there is one.
     DialogClosed(Option<PathBuf>),
+    /// A file was opened from Finder.
+    #[cfg(target_os = "macos")]
+    OpenFile(PathBuf),
+    /// The desktop's light or dark preference, which winit doesn't report on Linux.
+    #[cfg(target_os = "linux")]
+    SystemTheme(winit::window::Theme),
 }
 
 fn main() {
@@ -53,6 +60,10 @@ fn main() {
     };
 
     icon::spawn_load(event_loop.create_proxy());
+    #[cfg(target_os = "macos")]
+    platform::macos::install_open_handler(event_loop.create_proxy());
+    #[cfg(target_os = "linux")]
+    platform::linux::spawn_theme_query(event_loop.create_proxy());
 
     // The app starts parsing the file right away, while the window is being created.
     let mut app = app::App::new(start, renderer, event_loop.create_proxy(), path);

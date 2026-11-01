@@ -634,12 +634,22 @@ impl App {
         let m = self.modifiers;
         // Cmd on macOS, Ctrl elsewhere.
         let primary = if cfg!(target_os = "macos") { m.super_key() } else { m.control_key() };
-        if primary && !event.repeat {
+        let center = self.center();
+        if primary {
             if let Key::Character(c) = event.key_without_modifiers() {
+                let once = !event.repeat;
                 match c.to_lowercase().as_str() {
-                    "o" => self.open_dialog(),
-                    "v" => self.paste(),
-                    "w" | "q" => self.exit_requested = true,
+                    "o" if once => self.open_dialog(),
+                    "v" if once => self.paste(),
+                    "w" | "q" if once => self.exit_requested = true,
+                    // Browsers and most viewers zoom with Ctrl/Cmd and these keys.
+                    "+" | "=" => self.zoom_at(KEY_ZOOM, center),
+                    "-" => self.zoom_at(1.0 / KEY_ZOOM, center),
+                    "0" if once => self.refit(),
+                    // Ctrl+Cmd+F is the usual full-screen shortcut on macOS.
+                    "f" if once && cfg!(target_os = "macos") && m.control_key() => {
+                        self.toggle_fullscreen();
+                    }
                     _ => {}
                 }
             }
@@ -649,7 +659,6 @@ impl App {
             return;
         }
         let step = (ARROW_STEP * self.scale_factor) as f32;
-        let center = self.center();
         match &event.logical_key {
             Key::Character(c) => match c.as_str() {
                 "+" | "=" => self.zoom_at(KEY_ZOOM, center),
@@ -822,6 +831,13 @@ impl ApplicationHandler<AppEvent> for App {
         let attributes = Window::default_attributes()
             .with_title(APP_NAME)
             .with_inner_size(LogicalSize::new(1024.0, 768.0));
+        // The Wayland app ID and X11 WM_CLASS. Desktops match it to
+        // peregrineview.desktop for the taskbar icon and window grouping.
+        #[cfg(target_os = "linux")]
+        let attributes = {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            attributes.with_name("peregrineview", "peregrineview")
+        };
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Rc::new(window),
             Err(e) => {
@@ -879,6 +895,10 @@ impl ApplicationHandler<AppEvent> for App {
                 self.icons = Some(icons);
                 self.apply_icons();
             }
+            #[cfg(target_os = "macos")]
+            AppEvent::OpenFile(path) => self.open(Source::File(path)),
+            #[cfg(target_os = "linux")]
+            AppEvent::SystemTheme(theme) => self.set_theme(theme),
         }
     }
 
@@ -934,6 +954,11 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::CursorMoved { position, .. } => self.on_cursor_moved(position),
             // A release can be missed while another window has focus.
             WindowEvent::Focused(false) => self.drag_from = None,
+            // Linux sends no ThemeChanged, so check again when the user comes back.
+            #[cfg(target_os = "linux")]
+            WindowEvent::Focused(true) => {
+                crate::platform::linux::spawn_theme_query(self.proxy.clone());
+            }
             WindowEvent::MouseInput { state, button, .. } => self.on_mouse_button(state, button),
             WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta),
             WindowEvent::PinchGesture { delta, .. } if delta.is_finite() => {
