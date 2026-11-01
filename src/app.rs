@@ -12,19 +12,18 @@ use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, Window
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
-use winit::window::{Window, WindowId};
+use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::AppEvent;
 use crate::loader::{self, Document, Source};
-use crate::render::{self, Frame, Job, Renderer};
+use crate::render::{self, Backdrop, Frame, Job, Renderer};
 use crate::text::TextRenderer;
-use crate::ui::Banner;
+use crate::ui::{self, Background, Banner, Button, Hit, Info, Scene, Theme, Ui};
 use crate::view::{self, Limits, View};
 
 const APP_NAME: &str = "PeregrineView";
 /// Space around the picture in fit mode, in logical pixels.
 const FIT_MARGIN: f64 = 16.0;
-const BACKGROUND: u32 = 0xF4F4F4;
 /// How long input must stop before the sharp render starts.
 const SETTLE_DELAY: Duration = Duration::from_millis(100);
 /// Zoom per mouse wheel notch.
@@ -50,7 +49,19 @@ pub struct App {
     /// Counts started loads, so a slower, older load can't replace a newer one.
     load_id: u64,
     text: Option<TextRenderer>,
+    ui: Ui,
     banner: Option<Banner>,
+    theme: Theme,
+    background: Background,
+    /// The toolbar or empty-screen button under the cursor.
+    hovered: Option<Button>,
+    /// The button the left mouse button went down on, until it comes up.
+    pressed: Option<Button>,
+    /// True while a file is dragged over the window.
+    file_hovering: bool,
+    cursor_icon: CursorIcon,
+    /// True from opening a file until its load finishes.
+    loading: bool,
     dialog_open: bool,
     doc: Option<Document>,
     /// Counts opened documents, so renders of an older one can be dropped.
@@ -91,7 +102,15 @@ impl App {
             proxy,
             load_id: 0,
             text: None,
+            ui: Ui::default(),
             banner: None,
+            theme: Theme::Light,
+            background: Background::Checkerboard,
+            hovered: None,
+            pressed: None,
+            file_hovering: false,
+            cursor_icon: CursorIcon::Default,
+            loading: false,
             dialog_open: false,
             doc: None,
             doc_id: 0,
@@ -117,6 +136,7 @@ impl App {
 
     fn open(&mut self, source: Source) {
         self.load_id += 1;
+        self.loading = true;
         loader::spawn_load(self.load_id, source, self.proxy.clone());
     }
 
@@ -124,6 +144,97 @@ impl App {
         eprintln!("error: {message}");
         self.banner = Some(Banner::new(message));
         self.request_redraw();
+    }
+
+    fn backdrop(&self) -> Backdrop {
+        ui::backdrop(self.theme, self.background, self.scale_factor as f32)
+    }
+
+    /// The colors changed: redraw the picture right away.
+    fn style_changed(&mut self) {
+        self.settle_at = Some(Instant::now());
+        self.request_redraw();
+    }
+
+    fn cycle_background(&mut self) {
+        self.background = self.background.next();
+        self.style_changed();
+    }
+
+    fn set_theme(&mut self, theme: winit::window::Theme) {
+        let theme = match theme {
+            winit::window::Theme::Light => Theme::Light,
+            winit::window::Theme::Dark => Theme::Dark,
+        };
+        if theme != self.theme {
+            self.theme = theme;
+            self.style_changed();
+        }
+    }
+
+    /// What the UI shows right now.
+    fn scene(&self) -> Scene {
+        Scene {
+            window: (self.viewport.width, self.viewport.height),
+            scale: self.scale_factor as f32,
+            theme: self.theme,
+            info: self.doc.as_ref().map(|doc| Info {
+                name: doc.name.clone(),
+                size: doc.size,
+                file_size: doc.file_size,
+            }),
+            show_empty: !self.loading,
+            zoom_percent: self.view.scale / self.actual_size_scale() * 100.0,
+            background: self.background,
+            nav_enabled: false,
+            hovered: self.hovered,
+            pressed: self.pressed,
+            file_hovering: self.file_hovering,
+        }
+    }
+
+    fn activate(&mut self, button: Button) {
+        let center = self.center();
+        match button {
+            Button::Open => self.open_dialog(),
+            // Folder navigation comes in milestone 6; the buttons stay disabled until then.
+            Button::Previous | Button::Next => {}
+            Button::ZoomOut => self.zoom_at(1.0 / KEY_ZOOM, center),
+            Button::Zoom => self.toggle_actual_size(),
+            Button::ZoomIn => self.zoom_at(KEY_ZOOM, center),
+            Button::Fit => self.refit(),
+            Button::Background => self.cycle_background(),
+        }
+    }
+
+    fn set_cursor_icon(&mut self, icon: CursorIcon) {
+        if icon != self.cursor_icon {
+            self.cursor_icon = icon;
+            if let Some(gfx) = &self.gfx {
+                gfx.window.set_cursor(icon);
+            }
+        }
+    }
+
+    /// Updates the hovered button and the cursor shape for the cursor position.
+    fn update_hover(&mut self) {
+        let hit = if self.drag_from.is_some() { None } else { ui::hit(&self.scene(), self.cursor) };
+        let hovered = match hit {
+            Some(Hit::Button(button)) => Some(button),
+            _ => None,
+        };
+        if hovered != self.hovered {
+            self.hovered = hovered;
+            self.request_redraw();
+        }
+        let icon = if self.drag_from.is_some() {
+            CursorIcon::Grabbing
+        } else if hovered.is_some() {
+            CursorIcon::Pointer
+        } else {
+            CursorIcon::Default
+        };
+        self.set_cursor_icon(icon);
     }
 
     fn open_dialog(&mut self) {
@@ -304,6 +415,29 @@ impl App {
     }
 
     fn on_mouse_button(&mut self, state: ElementState, button: MouseButton) {
+        // Presses on the UI never reach the picture.
+        let pressed = state == ElementState::Pressed;
+        if pressed && matches!(button, MouseButton::Left | MouseButton::Middle) {
+            match ui::hit(&self.scene(), self.cursor) {
+                Some(Hit::Button(hit)) if button == MouseButton::Left => {
+                    self.pressed = Some(hit);
+                    self.request_redraw();
+                    return;
+                }
+                Some(_) => return,
+                None => {}
+            }
+        }
+        if !pressed && button == MouseButton::Left
+            && let Some(button) = self.pressed.take()
+        {
+            self.request_redraw();
+            // A click counts when the button is released over the same button.
+            if ui::hit(&self.scene(), self.cursor) == Some(Hit::Button(button)) {
+                self.activate(button);
+            }
+            return;
+        }
         match (button, state) {
             (MouseButton::Left, ElementState::Pressed) => {
                 let now = Instant::now();
@@ -327,6 +461,7 @@ impl App {
             }
             _ => {}
         }
+        self.update_hover();
     }
 
     fn on_cursor_moved(&mut self, position: PhysicalPosition<f64>) {
@@ -335,6 +470,7 @@ impl App {
             self.drag_from = Some(self.cursor);
             self.pan(self.cursor.0 - from.0, self.cursor.1 - from.1);
         }
+        self.update_hover();
     }
 
     fn on_key(&mut self, event: &KeyEvent) {
@@ -365,6 +501,7 @@ impl App {
                 "-" => self.zoom_at(1.0 / KEY_ZOOM, center),
                 "0" | "f" | "F" => self.refit(),
                 "1" => self.toggle_actual_size(),
+                "b" | "B" => self.cycle_background(),
                 _ => {}
             },
             // The arrows move the view, so the picture moves the other way.
@@ -382,6 +519,7 @@ impl App {
             doc: self.doc_id,
             view: self.view,
             size: (self.viewport.width, self.viewport.height),
+            backdrop: self.backdrop(),
         }
     }
 
@@ -405,10 +543,11 @@ impl App {
             doc: self.doc_id,
             tree: doc.tree.clone(),
             base: doc.base,
+            picture_size: doc.size,
             view: self.view,
             width: target.size.0,
             height: target.size.1,
-            background: BACKGROUND,
+            backdrop: target.backdrop,
         });
     }
 
@@ -437,6 +576,8 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        let target = self.target();
+        let scene = self.scene();
         let Some(gfx) = &mut self.gfx else { return };
         let size = (self.viewport.width, self.viewport.height);
         let (Some(w), Some(h)) = (NonZeroU32::new(size.0), NonZeroU32::new(size.1)) else {
@@ -455,7 +596,7 @@ impl App {
                 return;
             }
         };
-        let target = Target { doc: self.doc_id, view: self.view, size };
+        let canvas = target.backdrop.canvas;
         let sharp = match &self.frame {
             Some(f) if Target::of(f) == target && f.pixels.len() == buffer.len() => {
                 buffer.copy_from_slice(&f.pixels);
@@ -463,16 +604,19 @@ impl App {
             }
             Some(f) if f.doc == self.doc_id => {
                 let from = (f.width, f.height);
-                render::blit_preview(&f.pixels, from, f.view, &mut buffer, size, self.view, BACKGROUND);
+                render::blit_preview(&f.pixels, from, f.view, &mut buffer, size, self.view, canvas);
                 false
             }
             _ => {
-                buffer.fill(BACKGROUND);
+                buffer.fill(canvas);
                 false
             }
         };
-        if let (Some(banner), Some(text)) = (&mut self.banner, &self.text) {
-            banner.draw(text, &mut buffer, size, self.scale_factor as f32);
+        if let Some(text) = &self.text {
+            self.ui.draw(text, &scene, &mut buffer);
+            if let Some(banner) = &mut self.banner {
+                banner.draw(text, &mut buffer, size, scene.scale);
+            }
         }
         gfx.window.pre_present_notify();
         if let Err(e) = buffer.present() {
@@ -490,17 +634,23 @@ impl App {
     }
 }
 
-/// The document, view and window size a frame is drawn for.
+/// The document, view, window size and colors a frame is drawn for.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Target {
     doc: u64,
     view: View,
     size: (u32, u32),
+    backdrop: Backdrop,
 }
 
 impl Target {
     fn of(frame: &Frame) -> Target {
-        Target { doc: frame.doc, view: frame.view, size: (frame.width, frame.height) }
+        Target {
+            doc: frame.doc,
+            view: frame.view,
+            size: (frame.width, frame.height),
+            backdrop: frame.backdrop,
+        }
     }
 }
 
@@ -534,6 +684,9 @@ impl ApplicationHandler<AppEvent> for App {
             window.set_title(&format!("{} – {APP_NAME}", doc.name));
         }
         self.text = TextRenderer::new();
+        if let Some(theme) = window.theme() {
+            self.set_theme(theme);
+        }
         self.viewport = window.inner_size();
         self.scale_factor = window.scale_factor();
         self.gfx = Some(Gfx { window, surface });
@@ -546,19 +699,24 @@ impl ApplicationHandler<AppEvent> for App {
             AppEvent::Loaded { id, .. } if id != self.load_id => {
                 eprintln!("load dropped: a newer one was started");
             }
-            AppEvent::Loaded { result: Ok(doc), .. } => {
-                if let Some(gfx) = &self.gfx {
-                    gfx.window.set_title(&format!("{} – {APP_NAME}", doc.name));
+            AppEvent::Loaded { result, .. } => {
+                self.loading = false;
+                match result {
+                    Ok(doc) => {
+                        if let Some(gfx) = &self.gfx {
+                            gfx.window.set_title(&format!("{} – {APP_NAME}", doc.name));
+                        }
+                        // A good file clears any error about the one before.
+                        self.banner = None;
+                        self.doc = Some(doc);
+                        self.doc_id += 1;
+                        self.frame = None;
+                        self.refit();
+                    }
+                    // The previous picture stays on screen.
+                    Err(e) => self.show_error(e.to_string()),
                 }
-                // A good file clears any error about the one before.
-                self.banner = None;
-                self.doc = Some(doc);
-                self.doc_id += 1;
-                self.frame = None;
-                self.refit();
             }
-            // The previous picture stays on screen.
-            AppEvent::Loaded { result: Err(e), .. } => self.show_error(e.to_string()),
             AppEvent::DialogClosed(path) => {
                 self.dialog_open = false;
                 if let Some(path) = path {
@@ -589,7 +747,23 @@ impl ApplicationHandler<AppEvent> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::DroppedFile(path) => self.open(Source::File(path)),
+            WindowEvent::DroppedFile(path) => {
+                self.file_hovering = false;
+                self.open(Source::File(path));
+            }
+            WindowEvent::HoveredFile(_) => {
+                self.file_hovering = true;
+                self.request_redraw();
+            }
+            WindowEvent::HoveredFileCancelled => {
+                self.file_hovering = false;
+                self.request_redraw();
+            }
+            WindowEvent::ThemeChanged(theme) => self.set_theme(theme),
+            WindowEvent::CursorLeft { .. } => {
+                self.hovered = None;
+                self.request_redraw();
+            }
             WindowEvent::Resized(size) => self.on_resized(size),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.on_scale_factor_changed(scale_factor);

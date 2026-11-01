@@ -4,12 +4,27 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use resvg::tiny_skia::{Color, Pixmap, Transform};
+use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg;
 use winit::event_loop::EventLoopProxy;
 
 use crate::AppEvent;
 use crate::view::View;
+
+/// What fills the area behind the picture. Colors are 0x00RRGGBB.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Fill {
+    Solid(u32),
+    /// Squares of `cell` pixels, lined up with the picture's top left corner.
+    Checker { light: u32, dark: u32, cell: u32 },
+}
+
+/// The window color around the picture, and the fill behind it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Backdrop {
+    pub canvas: u32,
+    pub picture: Fill,
+}
 
 /// A request to draw `tree` with `view` into a `width` × `height` window.
 pub struct Job {
@@ -18,11 +33,12 @@ pub struct Job {
     pub tree: Arc<usvg::Tree>,
     /// Maps tree coordinates to picture coordinates.
     pub base: Transform,
+    /// The picture's size in CSS pixels, so the backdrop knows where it is.
+    pub picture_size: (f32, f32),
     pub view: View,
     pub width: u32,
     pub height: u32,
-    /// Opaque background as 0x00RRGGBB.
-    pub background: u32,
+    pub backdrop: Backdrop,
 }
 
 /// A finished render: window pixels as 0x00RRGGBB, for the view it was drawn at.
@@ -32,6 +48,7 @@ pub struct Frame {
     pub view: View,
     pub width: u32,
     pub height: u32,
+    pub backdrop: Backdrop,
     pub pixels: Vec<u32>,
     pub took: Duration,
 }
@@ -75,8 +92,14 @@ fn worker(rx: Receiver<Job>, proxy: EventLoopProxy<AppEvent>) {
 fn render(job: &Job) -> Option<Frame> {
     let start = Instant::now();
     let mut pixmap = Pixmap::new(job.width, job.height)?;
-    let [_, r, g, b] = job.background.to_be_bytes();
-    pixmap.fill(Color::from_rgba8(r, g, b, 255));
+    let mut backdrop = vec![0; job.width as usize * job.height as usize];
+    let (w, h) = job.picture_size;
+    let picture = (job.view.tx, job.view.ty, w * job.view.scale, h * job.view.scale);
+    paint_backdrop(&mut backdrop, (job.width, job.height), picture, job.backdrop);
+    for (dst, src) in pixmap.data_mut().as_chunks_mut::<4>().0.iter_mut().zip(&backdrop) {
+        let [_, r, g, b] = src.to_be_bytes();
+        *dst = [r, g, b, 255];
+    }
     let transform = job.view.transform().pre_concat(job.base);
     resvg::render(&job.tree, transform, &mut pixmap.as_mut());
 
@@ -92,9 +115,42 @@ fn render(job: &Job) -> Option<Frame> {
         view: job.view,
         width: job.width,
         height: job.height,
+        backdrop: job.backdrop,
         pixels,
         took: start.elapsed(),
     })
+}
+
+/// Fills `pixels` with the canvas color, and the `picture` rectangle
+/// (x, y, width, height in window pixels) with the picture fill.
+fn paint_backdrop(pixels: &mut [u32], size: (u32, u32), picture: (f32, f32, f32, f32), backdrop: Backdrop) {
+    pixels.fill(backdrop.canvas);
+    let (width, height) = (size.0 as usize, size.1 as usize);
+    if width == 0 || pixels.len() < width * height {
+        return;
+    }
+    let (x, y, w, h) = picture;
+    if !(x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()) {
+        return;
+    }
+    let clamp = |v: f32, max: usize| v.round().clamp(0.0, max as f32) as usize;
+    let (x0, x1) = (clamp(x, width), clamp(x + w, width));
+    let (y0, y1) = (clamp(y, height), clamp(y + h, height));
+    let origin = (x.round() as i64, y.round() as i64);
+    for (row_index, row) in pixels.chunks_exact_mut(width).enumerate().take(y1).skip(y0) {
+        let row = &mut row[x0..x1];
+        match backdrop.picture {
+            Fill::Solid(color) => row.fill(color),
+            Fill::Checker { light, dark, cell } => {
+                let cell = i64::from(cell.max(1));
+                let cy = (row_index as i64 - origin.1).div_euclid(cell);
+                for (i, pixel) in row.iter_mut().enumerate() {
+                    let cx = ((x0 + i) as i64 - origin.0).div_euclid(cell);
+                    *pixel = if (cx + cy) % 2 == 0 { light } else { dark };
+                }
+            }
+        }
+    }
 }
 
 /// Draws `src` (rendered at view `from`) into `dst` as it would look at view
@@ -187,6 +243,23 @@ mod tests {
         let mut dst = vec![0; 6];
         blit_preview(&source(), (4, 2), view(1.0, 0.0, 0.0), &mut dst, (2, 3), view(1.0, 0.0, 0.0), BG);
         assert_eq!(dst, vec![0, 1, 4, 5, BG, BG]);
+    }
+
+    #[test]
+    fn backdrop_fills_canvas_and_picture() {
+        let backdrop = Backdrop { canvas: 1, picture: Fill::Solid(2) };
+        let mut pixels = vec![0; 16];
+        paint_backdrop(&mut pixels, (4, 4), (1.0, 1.0, 2.0, 2.0), backdrop);
+        assert_eq!(pixels, vec![1, 1, 1, 1, 1, 2, 2, 1, 1, 2, 2, 1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn checker_lines_up_with_the_picture_and_clips() {
+        let backdrop = Backdrop { canvas: 0, picture: Fill::Checker { light: 1, dark: 2, cell: 1 } };
+        let mut pixels = vec![9; 9];
+        // The picture starts above and left of the window.
+        paint_backdrop(&mut pixels, (3, 3), (-1.0, -1.0, 3.0, 3.0), backdrop);
+        assert_eq!(pixels, vec![1, 2, 0, 2, 1, 0, 0, 0, 0]);
     }
 
     #[test]

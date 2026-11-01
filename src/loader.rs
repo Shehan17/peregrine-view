@@ -28,6 +28,8 @@ pub struct Document {
     /// The file, or None for pasted SVG code.
     pub path: Option<PathBuf>,
     pub name: String,
+    /// The size of the file on disk, or None for pasted SVG code.
+    pub file_size: Option<u64>,
     /// The picture's size in CSS pixels, as shown at 100%.
     pub size: (f32, f32),
     /// Maps tree coordinates to picture coordinates, for SVGs whose size had
@@ -93,12 +95,15 @@ pub fn load(source: &Source) -> Result<Document, LoadError> {
                     LoadError::Unreadable
                 }
             })?;
+            let file_size = bytes.len() as u64;
             let bytes = if is_gzip(&bytes) { gunzip(&bytes)? } else { bytes };
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string());
-            parse(&decode_text(&bytes), path.parent(), name, Some(path.clone()))?
+            let mut doc = parse(&decode_text(&bytes), path.parent(), name, Some(path.clone()))?;
+            doc.file_size = Some(file_size);
+            doc
         }
         Source::Text(text) => parse(text, None, "Pasted SVG".into(), None)?,
     };
@@ -137,7 +142,7 @@ fn parse(
     })?;
 
     let (size, base) = picture_size(&tree, &root)?;
-    Ok(Document { tree: Arc::new(tree), path, name, size, base })
+    Ok(Document { tree: Arc::new(tree), path, name, file_size: None, size, base })
 }
 
 /// Applies the spec's size rules on top of the size usvg worked out.
