@@ -4,23 +4,25 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use resvg::tiny_skia::{Color, Pixmap};
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::AppEvent;
 use crate::loader::Document;
+use crate::render::{self, Frame, Job, Renderer};
 use crate::view::{self, Limits, View};
 
 const APP_NAME: &str = "PeregrineView";
 /// Space around the picture in fit mode, in logical pixels.
 const FIT_MARGIN: f64 = 16.0;
-const BACKGROUND: (u8, u8, u8) = (0xF4, 0xF4, 0xF4);
+const BACKGROUND: u32 = 0xF4F4F4;
+/// How long input must stop before the sharp render starts.
+const SETTLE_DELAY: Duration = Duration::from_millis(100);
 /// Zoom per mouse wheel notch.
 const WHEEL_ZOOM: f32 = 1.2;
 /// Zoom per `+` or `-` key press.
@@ -39,7 +41,18 @@ struct Gfx {
 pub struct App {
     started: Instant,
     gfx: Option<Gfx>,
+    renderer: Renderer,
     doc: Option<Document>,
+    /// Counts opened documents, so renders of an older one can be dropped.
+    doc_id: u64,
+    /// The last sharp render. While the view moves it is shown scaled and shifted.
+    frame: Option<Frame>,
+    /// Counts submitted render jobs.
+    generation: u64,
+    /// The newest job sent to the render thread, until its result arrives.
+    in_flight: Option<(u64, Target)>,
+    /// When to ask for a sharp render, once input has stopped.
+    settle_at: Option<Instant>,
     view: View,
     /// While true, the picture refits whenever the window changes size.
     fit_mode: bool,
@@ -55,11 +68,17 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(started: Instant) -> Self {
+    pub fn new(started: Instant, renderer: Renderer) -> Self {
         Self {
             started,
             gfx: None,
+            renderer,
             doc: None,
+            doc_id: 0,
+            frame: None,
+            generation: 0,
+            in_flight: None,
+            settle_at: None,
             view: View::default(),
             fit_mode: true,
             first_frame_shown: false,
@@ -76,6 +95,16 @@ impl App {
         if let Some(gfx) = &self.gfx {
             gfx.window.request_redraw();
         }
+    }
+
+    /// Shows a preview now and schedules a sharp render for when input stops.
+    fn view_changed(&mut self) {
+        // With no picture of this document yet there is nothing to preview,
+        // so render right away.
+        let has_frame = self.frame.as_ref().is_some_and(|f| f.doc == self.doc_id);
+        let delay = if has_frame { SETTLE_DELAY } else { Duration::ZERO };
+        self.settle_at = Some(Instant::now() + delay);
+        self.request_redraw();
     }
 
     fn content_size(&self) -> Option<(f32, f32)> {
@@ -102,7 +131,7 @@ impl App {
         if let Some(fit) = self.fit_view() {
             self.view = fit;
             self.fit_mode = true;
-            self.request_redraw();
+            self.view_changed();
         }
     }
 
@@ -113,7 +142,7 @@ impl App {
         if view != self.view {
             self.view = view;
             self.fit_mode = false;
-            self.request_redraw();
+            self.view_changed();
         }
     }
 
@@ -151,7 +180,7 @@ impl App {
             let dx = (size.width as f32 - old.width as f32) / 2.0;
             let dy = (size.height as f32 - old.height as f32) / 2.0;
             self.view = self.view.pan(dx, dy);
-            self.request_redraw();
+            self.view_changed();
         }
     }
 
@@ -164,6 +193,7 @@ impl App {
             let center = self.center();
             let wide = Limits { min: 0.0, max: f32::INFINITY };
             self.view = self.view.zoom_at(ratio, center, wide);
+            self.view_changed();
         }
     }
 
@@ -246,25 +276,73 @@ impl App {
         }
     }
 
+    /// What a sharp render of the current state would be drawn for.
+    fn target(&self) -> Target {
+        Target {
+            doc: self.doc_id,
+            view: self.view,
+            size: (self.viewport.width, self.viewport.height),
+        }
+    }
+
+    /// Starts a sharp render of the visible area, unless one is already
+    /// on screen or on the way.
+    fn request_sharp(&mut self) {
+        let Some(doc) = &self.doc else { return };
+        let target = self.target();
+        if target.size.0 == 0 || target.size.1 == 0 {
+            return;
+        }
+        let shown = self.frame.as_ref().is_some_and(|f| Target::of(f) == target);
+        let coming = self.in_flight.is_some_and(|(_, t)| t == target);
+        if shown || coming {
+            return;
+        }
+        self.generation += 1;
+        self.in_flight = Some((self.generation, target));
+        self.renderer.submit(Job {
+            generation: self.generation,
+            doc: self.doc_id,
+            tree: doc.tree.clone(),
+            view: self.view,
+            width: target.size.0,
+            height: target.size.1,
+            background: BACKGROUND,
+        });
+    }
+
+    fn on_rendered(&mut self, frame: Frame) {
+        let latest = self.in_flight.is_some_and(|(generation, _)| generation == frame.generation);
+        if !latest {
+            eprintln!("render dropped: a newer job replaced it");
+            return;
+        }
+        self.in_flight = None;
+        eprintln!("render {}x{}: {:?}", frame.width, frame.height, frame.took);
+
+        let current = Target::of(&frame) == self.target();
+        // A render for an old view is dropped, unless there is nothing better
+        // to preview from, as when the user moves before the first picture.
+        let nothing_better = self.frame.as_ref().is_none_or(|f| f.doc != self.doc_id);
+        if frame.doc == self.doc_id && (current || nothing_better) {
+            self.frame = Some(frame);
+            self.request_redraw();
+        } else {
+            eprintln!("render dropped: the view changed while it was drawn");
+        }
+        if !current && self.settle_at.is_none() {
+            self.settle_at = Some(Instant::now());
+        }
+    }
+
     fn redraw(&mut self) {
         let Some(gfx) = &mut self.gfx else { return };
-        let size = gfx.window.inner_size();
-        let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
+        let size = (self.viewport.width, self.viewport.height);
+        let (Some(w), Some(h)) = (NonZeroU32::new(size.0), NonZeroU32::new(size.1)) else {
             return; // Minimized.
         };
 
         let start = Instant::now();
-        let Some(mut pixmap) = Pixmap::new(w.get(), h.get()) else {
-            eprintln!("could not allocate a {w}x{h} pixmap");
-            return;
-        };
-        let (r, g, b) = BACKGROUND;
-        pixmap.fill(Color::from_rgba8(r, g, b, 255));
-        if let Some(doc) = &self.doc {
-            resvg::render(&doc.tree, self.view.transform(), &mut pixmap.as_mut());
-        }
-        let rendered = start.elapsed();
-
         if let Err(e) = gfx.surface.resize(w, h) {
             eprintln!("surface resize failed: {e}");
             return;
@@ -276,11 +354,22 @@ impl App {
                 return;
             }
         };
-        // The background is opaque, so premultiplied RGBA is already plain RGB.
-        let (pixels, _) = pixmap.data().as_chunks::<4>();
-        for (dst, &[r, g, b, _]) in buffer.iter_mut().zip(pixels) {
-            *dst = (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
-        }
+        let target = Target { doc: self.doc_id, view: self.view, size };
+        let sharp = match &self.frame {
+            Some(f) if Target::of(f) == target && f.pixels.len() == buffer.len() => {
+                buffer.copy_from_slice(&f.pixels);
+                true
+            }
+            Some(f) if f.doc == self.doc_id => {
+                let from = (f.width, f.height);
+                render::blit_preview(&f.pixels, from, f.view, &mut buffer, size, self.view, BACKGROUND);
+                false
+            }
+            _ => {
+                buffer.fill(BACKGROUND);
+                false
+            }
+        };
         gfx.window.pre_present_notify();
         if let Err(e) = buffer.present() {
             eprintln!("present failed: {e}");
@@ -288,11 +377,26 @@ impl App {
         }
 
         let zoom = self.view.scale / self.actual_size_scale() * 100.0;
-        eprintln!("frame {w}x{h} at {zoom:.0}%: render {rendered:?}, total {:?}", start.elapsed());
-        if !self.first_frame_shown && self.doc.is_some() {
+        let kind = if sharp { "sharp" } else { "preview" };
+        eprintln!("present {kind} {w}x{h} at {zoom:.0}%: {:?}", start.elapsed());
+        if sharp && !self.first_frame_shown {
             self.first_frame_shown = true;
             eprintln!("first picture {:?} after start", self.started.elapsed());
         }
+    }
+}
+
+/// The document, view and window size a frame is drawn for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Target {
+    doc: u64,
+    view: View,
+    size: (u32, u32),
+}
+
+impl Target {
+    fn of(frame: &Frame) -> Target {
+        Target { doc: frame.doc, view: frame.view, size: (frame.width, frame.height) }
     }
 }
 
@@ -340,11 +444,26 @@ impl ApplicationHandler<AppEvent> for App {
                     gfx.window.set_title(&format!("{} – {APP_NAME}", doc.file_name));
                 }
                 self.doc = Some(doc);
+                self.doc_id += 1;
+                self.frame = None;
                 self.refit();
             }
             // The previous picture stays on screen. The error banner comes in milestone 4.
             AppEvent::Loaded(Err(e)) => eprintln!("error: {e}"),
+            AppEvent::Rendered(frame) => self.on_rendered(frame),
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(at) = self.settle_at {
+            if Instant::now() < at {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(at));
+                return;
+            }
+            self.settle_at = None;
+            self.request_sharp();
+        }
+        event_loop.set_control_flow(ControlFlow::Wait);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {

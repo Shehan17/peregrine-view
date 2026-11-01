@@ -11,7 +11,7 @@ use winit::event_loop::EventLoopProxy;
 use crate::AppEvent;
 
 pub struct Document {
-    pub tree: usvg::Tree,
+    pub tree: Arc<usvg::Tree>,
     pub path: PathBuf,
     pub file_name: String,
 }
@@ -99,7 +99,7 @@ pub fn load(path: &Path) -> Result<Document, LoadError> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
     eprintln!("parsed {file_name} in {:?}", start.elapsed());
-    Ok(Document { tree, path: path.to_path_buf(), file_name })
+    Ok(Document { tree: Arc::new(tree), path: path.to_path_buf(), file_name })
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {

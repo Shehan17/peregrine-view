@@ -2,6 +2,7 @@
 
 mod app;
 mod loader;
+mod render;
 mod view;
 
 use std::path::PathBuf;
@@ -12,6 +13,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 /// Messages from background threads to the event loop.
 pub enum AppEvent {
     Loaded(Result<loader::Document, loader::LoadError>),
+    Rendered(render::Frame),
 }
 
 fn main() {
@@ -32,7 +34,15 @@ fn main() {
         loader::spawn_load(path, event_loop.create_proxy());
     }
 
-    let mut app = app::App::new(start);
+    let renderer = match render::Renderer::spawn(event_loop.create_proxy()) {
+        Ok(renderer) => renderer,
+        Err(e) => {
+            eprintln!("could not start render thread: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let mut app = app::App::new(start, renderer);
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("event loop error: {e}");
         std::process::exit(1);
