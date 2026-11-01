@@ -36,6 +36,9 @@ embed-resource = "3.0"
 # Linux .desktop file list the MIME types.
 [package.metadata.packager]
 product-name = "PeregrineView"
+# Shown in Windows' Apps list. The installer also keeps its install folder
+# under Software\<publisher>, so changing it later leaves a stale key behind.
+publisher = "Shehan"
 # A placeholder. It must be final before the first macOS release, because
 # macOS treats an app with a changed identifier as a different app.
 identifier = "com.peregrineview.viewer"
