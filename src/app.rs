@@ -1,6 +1,7 @@
 //! App state and window event handling.
 
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -8,13 +9,16 @@ use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{Window, WindowId};
 
 use crate::AppEvent;
-use crate::loader::Document;
+use crate::loader::{self, Document, Source};
 use crate::render::{self, Frame, Job, Renderer};
+use crate::text::TextRenderer;
+use crate::ui::Banner;
 use crate::view::{self, Limits, View};
 
 const APP_NAME: &str = "PeregrineView";
@@ -42,6 +46,12 @@ pub struct App {
     started: Instant,
     gfx: Option<Gfx>,
     renderer: Renderer,
+    proxy: EventLoopProxy<AppEvent>,
+    /// Counts started loads, so a slower, older load can't replace a newer one.
+    load_id: u64,
+    text: Option<TextRenderer>,
+    banner: Option<Banner>,
+    dialog_open: bool,
     doc: Option<Document>,
     /// Counts opened documents, so renders of an older one can be dropped.
     doc_id: u64,
@@ -68,11 +78,21 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(started: Instant, renderer: Renderer) -> Self {
-        Self {
+    pub fn new(
+        started: Instant,
+        renderer: Renderer,
+        proxy: EventLoopProxy<AppEvent>,
+        path: Option<PathBuf>,
+    ) -> Self {
+        let mut app = Self {
             started,
             gfx: None,
             renderer,
+            proxy,
+            load_id: 0,
+            text: None,
+            banner: None,
+            dialog_open: false,
             doc: None,
             doc_id: 0,
             frame: None,
@@ -88,7 +108,76 @@ impl App {
             modifiers: ModifiersState::empty(),
             drag_from: None,
             last_click: None,
+        };
+        if let Some(path) = path {
+            app.open(Source::File(path));
         }
+        app
+    }
+
+    fn open(&mut self, source: Source) {
+        self.load_id += 1;
+        loader::spawn_load(self.load_id, source, self.proxy.clone());
+    }
+
+    fn show_error(&mut self, message: String) {
+        eprintln!("error: {message}");
+        self.banner = Some(Banner::new(message));
+        self.request_redraw();
+    }
+
+    fn open_dialog(&mut self) {
+        let Some(gfx) = &self.gfx else { return };
+        if self.dialog_open {
+            return;
+        }
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Open SVG")
+            .add_filter("SVG images", &["svg", "svgz"])
+            .add_filter("All files", &["*"])
+            .set_parent(&*gfx.window);
+        if let Some(folder) = self.doc.as_ref().and_then(|d| d.path.as_ref()?.parent()) {
+            dialog = dialog.set_directory(folder);
+        }
+        // The dialog blocks its thread until it closes, so it gets its own.
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new()
+            .name("open-dialog".into())
+            .spawn(move || {
+                let _ = proxy.send_event(AppEvent::DialogClosed(dialog.pick_file()));
+            });
+        match spawned {
+            Ok(_) => self.dialog_open = true,
+            Err(e) => eprintln!("could not start dialog thread: {e}"),
+        }
+    }
+
+    /// Opens a copied file, a copied path, or copied SVG code.
+    fn paste(&mut self) {
+        let mut clipboard = match arboard::Clipboard::new() {
+            Ok(clipboard) => clipboard,
+            Err(e) => {
+                eprintln!("clipboard: {e}");
+                self.show_error("The clipboard can't be read.".into());
+                return;
+            }
+        };
+        if let Some(path) = clipboard.get().file_list().ok().and_then(|files| files.into_iter().next()) {
+            self.open(Source::File(path));
+            return;
+        }
+        if let Ok(text) = clipboard.get_text() {
+            if text.contains("<svg") {
+                self.open(Source::Text(text));
+                return;
+            }
+            let path = PathBuf::from(text.trim().trim_matches('"'));
+            if path.is_file() {
+                self.open(Source::File(path));
+                return;
+            }
+        }
+        self.show_error("The clipboard has no SVG.".into());
     }
 
     fn request_redraw(&self) {
@@ -108,8 +197,7 @@ impl App {
     }
 
     fn content_size(&self) -> Option<(f32, f32)> {
-        let size = self.doc.as_ref()?.tree.size();
-        Some((size.width(), size.height()))
+        self.doc.as_ref().map(|doc| doc.size)
     }
 
     fn center(&self) -> (f32, f32) {
@@ -254,6 +342,18 @@ impl App {
             return;
         }
         let m = self.modifiers;
+        // Cmd on macOS, Ctrl elsewhere.
+        let primary = if cfg!(target_os = "macos") { m.super_key() } else { m.control_key() };
+        if primary && !event.repeat {
+            if let Key::Character(c) = event.key_without_modifiers() {
+                match c.to_lowercase().as_str() {
+                    "o" => self.open_dialog(),
+                    "v" => self.paste(),
+                    _ => {}
+                }
+            }
+            return;
+        }
         if m.control_key() || m.alt_key() || m.super_key() {
             return;
         }
@@ -304,6 +404,7 @@ impl App {
             generation: self.generation,
             doc: self.doc_id,
             tree: doc.tree.clone(),
+            base: doc.base,
             view: self.view,
             width: target.size.0,
             height: target.size.1,
@@ -370,6 +471,9 @@ impl App {
                 false
             }
         };
+        if let (Some(banner), Some(text)) = (&mut self.banner, &self.text) {
+            banner.draw(text, &mut buffer, size, self.scale_factor as f32);
+        }
         gfx.window.pre_present_notify();
         if let Err(e) = buffer.present() {
             eprintln!("present failed: {e}");
@@ -427,8 +531,9 @@ impl ApplicationHandler<AppEvent> for App {
             }
         };
         if let Some(doc) = &self.doc {
-            window.set_title(&format!("{} – {APP_NAME}", doc.file_name));
+            window.set_title(&format!("{} – {APP_NAME}", doc.name));
         }
+        self.text = TextRenderer::new();
         self.viewport = window.inner_size();
         self.scale_factor = window.scale_factor();
         self.gfx = Some(Gfx { window, surface });
@@ -438,37 +543,53 @@ impl ApplicationHandler<AppEvent> for App {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
-            AppEvent::Loaded(Ok(doc)) => {
-                eprintln!("showing {}", doc.path.display());
+            AppEvent::Loaded { id, .. } if id != self.load_id => {
+                eprintln!("load dropped: a newer one was started");
+            }
+            AppEvent::Loaded { result: Ok(doc), .. } => {
                 if let Some(gfx) = &self.gfx {
-                    gfx.window.set_title(&format!("{} – {APP_NAME}", doc.file_name));
+                    gfx.window.set_title(&format!("{} – {APP_NAME}", doc.name));
                 }
+                // A good file clears any error about the one before.
+                self.banner = None;
                 self.doc = Some(doc);
                 self.doc_id += 1;
                 self.frame = None;
                 self.refit();
             }
-            // The previous picture stays on screen. The error banner comes in milestone 4.
-            AppEvent::Loaded(Err(e)) => eprintln!("error: {e}"),
+            // The previous picture stays on screen.
+            AppEvent::Loaded { result: Err(e), .. } => self.show_error(e.to_string()),
+            AppEvent::DialogClosed(path) => {
+                self.dialog_open = false;
+                if let Some(path) = path {
+                    self.open(Source::File(path));
+                }
+            }
             AppEvent::Rendered(frame) => self.on_rendered(frame),
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(at) = self.settle_at {
-            if Instant::now() < at {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(at));
-                return;
-            }
+        let now = Instant::now();
+        if self.settle_at.is_some_and(|at| now >= at) {
             self.settle_at = None;
             self.request_sharp();
         }
-        event_loop.set_control_flow(ControlFlow::Wait);
+        if self.banner.as_ref().is_some_and(|b| now >= b.until) {
+            self.banner = None;
+            self.request_redraw();
+        }
+        let next = [self.settle_at, self.banner.as_ref().map(|b| b.until)].into_iter().flatten().min();
+        event_loop.set_control_flow(match next {
+            Some(at) => ControlFlow::WaitUntil(at),
+            None => ControlFlow::Wait,
+        });
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::DroppedFile(path) => self.open(Source::File(path)),
             WindowEvent::Resized(size) => self.on_resized(size),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.on_scale_factor_changed(scale_factor);

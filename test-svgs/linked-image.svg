@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="200">
+  <!-- The image path is relative to this file's folder. -->
+  <rect width="200" height="200" fill="#edf2f7"/>
+  <image x="20" y="20" width="160" height="160" href="images/checker.png" style="image-rendering:pixelated"/>
+</svg>

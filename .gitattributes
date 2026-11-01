@@ -1,0 +1,3 @@
+# Test files must keep their exact bytes (UTF-16, BOMs, gzip).
+test-svgs/** -text
+assets/** -text

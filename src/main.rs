@@ -3,6 +3,8 @@
 mod app;
 mod loader;
 mod render;
+mod text;
+mod ui;
 mod view;
 
 use std::path::PathBuf;
@@ -12,8 +14,10 @@ use winit::event_loop::{ControlFlow, EventLoop};
 
 /// Messages from background threads to the event loop.
 pub enum AppEvent {
-    Loaded(Result<loader::Document, loader::LoadError>),
+    Loaded { id: u64, result: Result<loader::Document, loader::LoadError> },
     Rendered(render::Frame),
+    /// The Open dialog closed, with the chosen file if there is one.
+    DialogClosed(Option<PathBuf>),
 }
 
 fn main() {
@@ -29,11 +33,6 @@ fn main() {
     };
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    // Parse while the window is being created.
-    if let Some(path) = path {
-        loader::spawn_load(path, event_loop.create_proxy());
-    }
-
     let renderer = match render::Renderer::spawn(event_loop.create_proxy()) {
         Ok(renderer) => renderer,
         Err(e) => {
@@ -42,7 +41,8 @@ fn main() {
         }
     };
 
-    let mut app = app::App::new(start, renderer);
+    // The app starts parsing the file right away, while the window is being created.
+    let mut app = app::App::new(start, renderer, event_loop.create_proxy(), path);
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("event loop error: {e}");
         std::process::exit(1);

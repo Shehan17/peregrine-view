@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use resvg::tiny_skia::{Color, Pixmap};
+use resvg::tiny_skia::{Color, Pixmap, Transform};
 use resvg::usvg;
 use winit::event_loop::EventLoopProxy;
 
@@ -16,6 +16,8 @@ pub struct Job {
     pub generation: u64,
     pub doc: u64,
     pub tree: Arc<usvg::Tree>,
+    /// Maps tree coordinates to picture coordinates.
+    pub base: Transform,
     pub view: View,
     pub width: u32,
     pub height: u32,
@@ -75,7 +77,8 @@ fn render(job: &Job) -> Option<Frame> {
     let mut pixmap = Pixmap::new(job.width, job.height)?;
     let [_, r, g, b] = job.background.to_be_bytes();
     pixmap.fill(Color::from_rgba8(r, g, b, 255));
-    resvg::render(&job.tree, job.view.transform(), &mut pixmap.as_mut());
+    let transform = job.view.transform().pre_concat(job.base);
+    resvg::render(&job.tree, transform, &mut pixmap.as_mut());
 
     // The background is opaque, so premultiplied RGBA is already plain RGB.
     let (rgba, _) = pixmap.data().as_chunks::<4>();

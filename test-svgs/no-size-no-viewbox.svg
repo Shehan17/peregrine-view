@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+  <!-- No width, height or viewBox: the content sits far from the origin. -->
+  <rect x="800" y="400" width="240" height="160" fill="#38a169" stroke="#22543d" stroke-width="8"/>
+  <circle cx="920" cy="480" r="50" fill="#f0fff4"/>
+</svg>
