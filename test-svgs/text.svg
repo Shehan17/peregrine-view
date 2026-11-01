@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="160" viewBox="0 0 400 160">
+  <rect width="400" height="160" fill="#fff" stroke="#999"/>
+  <text x="20" y="70" font-family="sans-serif" font-size="40" fill="#1a202c">PeregrineView</text>
+  <text x="20" y="120" font-family="serif" font-size="24" fill="#4a5568">Sharp text at any zoom</text>
+</svg>
