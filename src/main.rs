@@ -36,6 +36,15 @@ pub enum AppEvent {
     /// The desktop's light or dark preference, which winit doesn't report on Linux.
     #[cfg(target_os = "linux")]
     SystemTheme(winit::window::Theme),
+    /// The "Open with" chooser closed; false when it failed.
+    #[cfg(windows)]
+    OpenWithClosed(bool),
+    /// The apps that can open files ending in `ext`.
+    #[cfg(windows)]
+    Editors { ext: String, list: Vec<platform::Editor> },
+    /// Opening the file in `editor` finished.
+    #[cfg(windows)]
+    EditorOpened { editor: platform::Editor, result: Result<(), platform::windows::OpenError> },
 }
 
 fn main() {

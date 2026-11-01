@@ -27,6 +27,19 @@ const ICON: f32 = 20.0;
 const UI_FONT_SIZE: f32 = 13.0;
 const INFO_PAD_X: f32 = 12.0;
 const INFO_PAD_Y: f32 = 7.0;
+/// The ▾ part of the "Open in" button.
+const EDIT_ARROW: f32 = 28.0;
+/// The longest "Open in" label; longer ones are shortened with "…".
+const EDIT_MAX_LABEL: f32 = 240.0;
+/// Space kept between the info bar and the "Open in" button.
+const EDIT_GAP: f32 = 8.0;
+const MENU_GAP: f32 = 4.0;
+const MENU_PAD: f32 = 5.0;
+const MENU_ROW: f32 = 30.0;
+const MENU_SEPARATOR: f32 = 9.0;
+/// Where menu labels start, leaving room for the check mark.
+const MENU_TEXT_X: f32 = 34.0;
+const MENU_MIN_WIDTH: f32 = 180.0;
 const CHECKER_CELL: f32 = 8.0;
 const BANNER_FONT_SIZE: f32 = 14.0;
 const BANNER_PAD_X: f32 = 16.0;
@@ -137,6 +150,10 @@ pub fn backdrop(theme: Theme, background: Background, scale: f32) -> Backdrop {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
     Open,
+    /// The main part of the top right button: opens the file in the default app.
+    Edit,
+    /// The ▾ part of the top right button: shows the app menu.
+    EditMenu,
     Previous,
     Next,
     ZoomOut,
@@ -180,7 +197,7 @@ enum Item {
     Separator,
 }
 
-const TOOLBAR_ITEMS: [Item; 11] = [
+const TOOLBAR_ITEMS: &[Item] = &[
     Item::Button(Button::Open),
     Item::Separator,
     Item::Button(Button::Previous),
@@ -222,7 +239,7 @@ pub fn toolbar_layout(window: (u32, u32), scale: f32) -> ToolbarLayout {
     };
     let mut x = panel_x + TOOLBAR_PAD;
     let y = panel_y + TOOLBAR_PAD;
-    for item in &TOOLBAR_ITEMS {
+    for item in TOOLBAR_ITEMS {
         let w = width_of(item);
         match item {
             Item::Button(button) => layout.buttons.push((*button, Rect::scaled(x, y, w, BUTTON, scale))),
@@ -272,21 +289,157 @@ pub struct Scene {
     pub zoom_percent: f32,
     pub background: Background,
     pub nav_enabled: bool,
+    /// The "Open in" button, when the open picture is a file another app can open.
+    pub edit: Option<EditScene>,
+    /// The app menu, while it is open. Needs `edit`.
+    pub menu: Option<MenuScene>,
     pub hovered: Option<Button>,
     pub pressed: Option<Button>,
     pub file_hovering: bool,
+}
+
+/// The "Open in <app>" button in the top right corner.
+pub struct EditScene {
+    pub label: String,
+    /// The label's width and line height in logical pixels, from `measure`.
+    pub label_size: (f32, f32),
+}
+
+/// One line in the app menu.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MenuRow {
+    pub label: String,
+    pub enabled: bool,
+}
+
+/// The app menu under the "Open in" button.
+pub struct MenuScene {
+    /// The apps, then "Other app…", which comes after a separator.
+    pub rows: Vec<MenuRow>,
+    /// The row with a check mark: the default app.
+    pub checked: Option<usize>,
+    /// The row under the cursor, or picked with the arrow keys.
+    pub highlighted: Option<usize>,
+    /// The widest label in logical pixels, from `measure`.
+    pub text_width: f32,
+}
+
+/// The width and line height of `s` in the UI font, in logical pixels.
+pub fn measure(text: &TextRenderer, s: &str) -> (f32, f32) {
+    (text.measure(s, UI_FONT_SIZE), text.line_metrics(UI_FONT_SIZE).1)
+}
+
+/// Where the "Open in" button goes, in logical pixels: (x, y, main part
+/// width, height). It is as tall as the info bar.
+fn edit_box(window_w: f32, edit: &EditScene) -> (f32, f32, f32, f32) {
+    let (label_w, line_h) = edit.label_size;
+    let main_w = (label_w.min(EDIT_MAX_LABEL) + 2.0 * INFO_PAD_X).ceil();
+    let x = (window_w - EDGE - main_w - EDIT_ARROW).round();
+    (x, EDGE, main_w, line_h + 2.0 * INFO_PAD_Y)
+}
+
+#[derive(Debug, PartialEq)]
+pub struct EditLayout {
+    pub panel: Rect,
+    pub main: Rect,
+    pub arrow: Rect,
+}
+
+/// The "Open in" button, in the top right corner of a `window`-sized area.
+pub fn edit_layout(window: (u32, u32), scale: f32, edit: &EditScene) -> EditLayout {
+    let (x, y, main_w, h) = edit_box(window.0 as f32 / scale, edit);
+    EditLayout {
+        panel: Rect::scaled(x, y, main_w + EDIT_ARROW, h, scale),
+        main: Rect::scaled(x, y, main_w, h, scale),
+        arrow: Rect::scaled(x + main_w, y, EDIT_ARROW, h, scale),
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct MenuLayout {
+    pub panel: Rect,
+    pub rows: Vec<Rect>,
+    /// The line before the last row, when there is more than one row.
+    pub separator: Option<Rect>,
+}
+
+/// The app menu, right-aligned under the "Open in" button.
+pub fn menu_layout(window: (u32, u32), scale: f32, edit: &EditScene, menu: &MenuScene) -> MenuLayout {
+    let window_w = window.0 as f32 / scale;
+    let (edit_x, edit_y, main_w, edit_h) = edit_box(window_w, edit);
+    let right = edit_x + main_w + EDIT_ARROW;
+    // Room for the widest label: its start, the label, and the padding after
+    // it, inside the row, inside the panel's padding.
+    let width = (MENU_TEXT_X + menu.text_width + INFO_PAD_X + MENU_PAD + 1.0)
+        .max(MENU_MIN_WIDTH)
+        .max(main_w + EDIT_ARROW)
+        .min(window_w - 2.0 * EDGE)
+        .max(1.0)
+        .ceil();
+    let (x, top) = ((right - width).round(), edit_y + edit_h + MENU_GAP);
+
+    let count = menu.rows.len();
+    let has_separator = count > 1;
+    let mut layout = MenuLayout { panel: Rect::default(), rows: Vec::with_capacity(count), separator: None };
+    let mut y = top + MENU_PAD;
+    for i in 0..count {
+        if has_separator && i == count - 1 {
+            layout.separator = Some(Rect::scaled(x + MENU_PAD, y + MENU_SEPARATOR / 2.0, width - 2.0 * MENU_PAD, 0.0, scale));
+            y += MENU_SEPARATOR;
+        }
+        layout.rows.push(Rect::scaled(x + MENU_PAD, y, width - 2.0 * MENU_PAD, MENU_ROW, scale));
+        y += MENU_ROW;
+    }
+    layout.panel = Rect::scaled(x, top, width, y + MENU_PAD - top, scale);
+    layout
+}
+
+/// How wide the info bar may be, in window pixels, so it stays clear of the
+/// "Open in" button.
+fn info_max_width(scene: &Scene, scale: f32) -> i32 {
+    let mut max_width = scene.window.0 as f32 - 2.0 * EDGE * scale;
+    if let Some(edit) = &scene.edit {
+        max_width -= edit_layout(scene.window, scale, edit).panel.w as f32 + EDIT_GAP * scale;
+    }
+    max_width.max(40.0 * scale) as i32
 }
 
 /// What is under the cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
     Button(Button),
+    /// A row of the app menu.
+    MenuItem(usize),
     /// UI that takes the click but does nothing: a panel or a disabled button.
     Inert,
+    /// Anywhere outside the open app menu. A click there only closes it.
+    Dismiss,
 }
 
 pub fn hit(scene: &Scene, point: (f32, f32)) -> Option<Hit> {
     let scale = scale_or_one(scene.scale);
+    if let Some(edit) = &scene.edit {
+        let layout = edit_layout(scene.window, scale, edit);
+        if let Some(menu) = &scene.menu {
+            if layout.arrow.contains(point) {
+                return Some(Hit::Button(Button::EditMenu));
+            }
+            let menu_layout = menu_layout(scene.window, scale, edit, menu);
+            if let Some(i) = menu_layout.rows.iter().position(|row| row.contains(point)) {
+                return Some(if menu.rows[i].enabled { Hit::MenuItem(i) } else { Hit::Inert });
+            }
+            return Some(if menu_layout.panel.contains(point) { Hit::Inert } else { Hit::Dismiss });
+        }
+        if layout.main.contains(point) {
+            return Some(Hit::Button(Button::Edit));
+        }
+        if layout.arrow.contains(point) {
+            return Some(Hit::Button(Button::EditMenu));
+        }
+        if layout.panel.contains(point) {
+            return Some(Hit::Inert);
+        }
+    }
     if scene.info.is_some() {
         let layout = toolbar_layout(scene.window, scale);
         if !layout.panel.contains(point) {
@@ -306,7 +459,10 @@ pub fn hit(scene: &Scene, point: (f32, f32)) -> Option<Hit> {
 }
 
 fn is_enabled(scene: &Scene, button: Button) -> bool {
-    !matches!(button, Button::Previous | Button::Next) || scene.nav_enabled
+    match button {
+        Button::Previous | Button::Next => scene.nav_enabled,
+        _ => true,
+    }
 }
 
 fn scale_or_one(scale: f32) -> f32 {
@@ -374,6 +530,27 @@ struct ToolbarKey {
 }
 
 #[derive(PartialEq)]
+struct EditKey {
+    scale: f32,
+    theme: Theme,
+    label: String,
+    size: (i32, i32, i32),
+    hovered: Option<Button>,
+    pressed: Option<Button>,
+    menu_open: bool,
+}
+
+#[derive(PartialEq)]
+struct MenuKey {
+    scale: f32,
+    theme: Theme,
+    rows: Vec<MenuRow>,
+    checked: Option<usize>,
+    highlighted: Option<usize>,
+    size: (i32, i32),
+}
+
+#[derive(PartialEq)]
 struct InfoKey {
     scale: f32,
     theme: Theme,
@@ -396,6 +573,8 @@ struct EmptyKey {
 pub struct Ui {
     toolbar: Cached<ToolbarKey>,
     info: Cached<InfoKey>,
+    edit: Cached<EditKey>,
+    menu: Cached<MenuKey>,
     empty: Cached<EmptyKey>,
 }
 
@@ -405,7 +584,7 @@ impl Ui {
         let palette = scene.theme.palette();
         if let Some(info) = &scene.info {
             let label = info_label(info);
-            let max_width = scene.window.0 as i32 - (2.0 * EDGE * scale) as i32;
+            let max_width = info_max_width(scene, scale);
             let key = InfoKey { scale, theme: scene.theme, max_width, label };
             let pixmap = self.info.get(key, || draw_info(text, palette, &info_label(info), max_width, scale));
             if let Some(pixmap) = pixmap {
@@ -426,6 +605,40 @@ impl Ui {
             let pixmap = self.toolbar.get(key, || draw_toolbar(text, palette, scene, &layout, scale));
             if let Some(pixmap) = pixmap {
                 composite(dst, scene.window, pixmap, layout.panel.x.into(), layout.panel.y.into());
+            }
+
+            if let Some(edit) = &scene.edit {
+                let layout = edit_layout(scene.window, scale, edit);
+                let own = |button: Option<Button>| button.filter(|b| matches!(b, Button::Edit | Button::EditMenu));
+                let key = EditKey {
+                    scale,
+                    theme: scene.theme,
+                    label: edit.label.clone(),
+                    size: (layout.panel.w, layout.panel.h, layout.main.w),
+                    hovered: own(scene.hovered),
+                    pressed: own(scene.pressed),
+                    menu_open: scene.menu.is_some(),
+                };
+                let pixmap = self.edit.get(key, || draw_edit(text, palette, scene, edit, &layout, scale));
+                if let Some(pixmap) = pixmap {
+                    composite(dst, scene.window, pixmap, layout.panel.x.into(), layout.panel.y.into());
+                }
+                // The menu goes on top of everything else.
+                if let Some(menu) = &scene.menu {
+                    let layout = menu_layout(scene.window, scale, edit, menu);
+                    let key = MenuKey {
+                        scale,
+                        theme: scene.theme,
+                        rows: menu.rows.clone(),
+                        checked: menu.checked,
+                        highlighted: menu.highlighted,
+                        size: (layout.panel.w, layout.panel.h),
+                    };
+                    let pixmap = self.menu.get(key, || draw_menu(text, palette, menu, &layout, scale));
+                    if let Some(pixmap) = pixmap {
+                        composite(dst, scene.window, pixmap, layout.panel.x.into(), layout.panel.y.into());
+                    }
+                }
             }
         } else if scene.show_empty {
             let layout = empty_layout(scene.window, scale);
@@ -542,6 +755,109 @@ fn draw_info(
     text.draw(&mut pixmap, &name, size, pad_x.round(), baseline, palette.text);
     text.draw(&mut pixmap, details, size, (pad_x + name_w + gap).round(), baseline, palette.muted);
     Some(pixmap)
+}
+
+/// The "Open in <app>" button: the label, a divider, and the ▾.
+fn draw_edit(
+    text: &TextRenderer,
+    palette: &Palette,
+    scene: &Scene,
+    edit: &EditScene,
+    layout: &EditLayout,
+    scale: f32,
+) -> Option<Pixmap> {
+    let panel = layout.panel;
+    let mut pixmap = Pixmap::new(panel.w.max(1) as u32, panel.h.max(1) as u32)?;
+    draw_panel(&mut pixmap, palette, scale);
+
+    let inset = (3.0 * scale).round() as i32;
+    for (button, rect) in [(Button::Edit, layout.main), (Button::EditMenu, layout.arrow)] {
+        let rect = rect.offset(-panel.x, -panel.y);
+        // The ▾ stays lit while its menu is open.
+        let open = button == Button::EditMenu && scene.menu.is_some();
+        if scene.hovered == Some(button) || open {
+            let fill = if open || scene.pressed == Some(button) { palette.pressed } else { palette.hover };
+            let inner = Rect { x: rect.x + inset, y: rect.y + inset, w: rect.w - 2 * inset, h: rect.h - 2 * inset };
+            fill_rounded(&mut pixmap, inner, BUTTON_RADIUS * scale, fill);
+        }
+    }
+
+    let arrow = layout.arrow.offset(-panel.x, -panel.y);
+    let margin = (7.0 * scale).round() as i32;
+    let divider = Rect { x: arrow.x, y: arrow.y + margin, w: scale.round().max(1.0) as i32, h: arrow.h - 2 * margin };
+    fill_rounded(&mut pixmap, divider, 0.0, palette.separator);
+
+    let main = layout.main.offset(-panel.x, -panel.y);
+    let size = UI_FONT_SIZE * scale;
+    let pad_x = INFO_PAD_X * scale;
+    let (ascent, line_height) = text.line_metrics(size);
+    let label = fit_text_end(text, &edit.label, size, main.w as f32 - 2.0 * pad_x);
+    let baseline = main.y as f32 + (main.h as f32 - line_height) / 2.0 + ascent;
+    text.draw(&mut pixmap, &label, size, (main.x as f32 + pad_x).round(), baseline.round(), palette.text);
+
+    let icon_size = (16.0 * scale).round() as i32;
+    let icon_rect = Rect {
+        x: arrow.x + (arrow.w - icon_size) / 2,
+        y: arrow.y + (arrow.h - icon_size) / 2,
+        w: icon_size,
+        h: icon_size,
+    };
+    stroke_icon(&mut pixmap, &button_icon(Button::EditMenu), icon_rect, opaque(palette.icon), 2.4);
+    Some(pixmap)
+}
+
+/// The app menu: one row per app, a check mark on the default, and
+/// "Other app…" after a separator.
+fn draw_menu(text: &TextRenderer, palette: &Palette, menu: &MenuScene, layout: &MenuLayout, scale: f32) -> Option<Pixmap> {
+    let panel = layout.panel;
+    let mut pixmap = Pixmap::new(panel.w.max(1) as u32, panel.h.max(1) as u32)?;
+    draw_panel(&mut pixmap, palette, scale);
+
+    if let Some(separator) = layout.separator {
+        let line = Rect { h: scale.round().max(1.0) as i32, ..separator.offset(-panel.x, -panel.y) };
+        fill_rounded(&mut pixmap, line, 0.0, palette.separator);
+    }
+
+    let size = UI_FONT_SIZE * scale;
+    let (ascent, line_height) = text.line_metrics(size);
+    let text_x = (MENU_TEXT_X - MENU_PAD) * scale;
+    let icon_size = (16.0 * scale).round() as i32;
+    for (i, (row, rect)) in menu.rows.iter().zip(&layout.rows).enumerate() {
+        let rect = rect.offset(-panel.x, -panel.y);
+        if row.enabled && menu.highlighted == Some(i) {
+            fill_rounded(&mut pixmap, rect, BUTTON_RADIUS * scale, palette.hover);
+        }
+        if menu.checked == Some(i) {
+            let icon_rect = Rect {
+                x: rect.x + (9.0 * scale).round() as i32,
+                y: rect.y + (rect.h - icon_size) / 2,
+                w: icon_size,
+                h: icon_size,
+            };
+            stroke_icon(&mut pixmap, &check_mark(), icon_rect, opaque(palette.text), 2.4);
+        }
+        let room = rect.w as f32 - text_x - INFO_PAD_X * scale;
+        let label = fit_text_end(text, &row.label, size, room);
+        let color = if row.enabled { palette.text } else { palette.muted };
+        let baseline = rect.y as f32 + (rect.h as f32 - line_height) / 2.0 + ascent;
+        text.draw(&mut pixmap, &label, size, (rect.x as f32 + text_x).round(), baseline.round(), color);
+    }
+    Some(pixmap)
+}
+
+/// Shortens `s` with an ellipsis at the end until it fits `max_width`.
+fn fit_text_end(text: &TextRenderer, s: &str, size: f32, max_width: f32) -> String {
+    if text.measure(s, size) <= max_width {
+        return s.to_owned();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    for keep in (0..chars.len()).rev() {
+        let candidate: String = chars[..keep].iter().collect::<String>().trim_end().to_owned() + "…";
+        if text.measure(&candidate, size) <= max_width {
+            return candidate;
+        }
+    }
+    "…".to_owned()
 }
 
 /// Shortens `s` with an ellipsis in the middle until it fits `max_width`,
@@ -661,6 +977,7 @@ fn button_icon(button: Button) -> Option<Path> {
             polyline(pb, &[(3.0, 6.5), (3.0, 18.5), (21.0, 18.5), (21.0, 8.5), (12.0, 8.5), (10.0, 5.5), (3.0, 5.5), (3.0, 6.5)]);
             polyline(pb, &[(3.0, 11.0), (21.0, 11.0)]);
         }),
+        Button::EditMenu => icon(|pb| polyline(pb, &[(7.0, 10.0), (12.0, 15.0), (17.0, 10.0)])),
         Button::Previous => icon(|pb| polyline(pb, &[(14.5, 6.0), (8.5, 12.0), (14.5, 18.0)])),
         Button::Next => icon(|pb| polyline(pb, &[(9.5, 6.0), (15.5, 12.0), (9.5, 18.0)])),
         Button::ZoomOut => icon(magnifier),
@@ -678,8 +995,12 @@ fn button_icon(button: Button) -> Option<Path> {
             polyline(pb, &[(4.0, 4.0), (20.0, 4.0), (20.0, 20.0), (4.0, 20.0)]);
             pb.close();
         }),
-        Button::Zoom => None,
+        Button::Zoom | Button::Edit => None,
     }
+}
+
+fn check_mark() -> Option<Path> {
+    icon(|pb| polyline(pb, &[(5.0, 12.5), (10.0, 17.5), (19.0, 7.5)]))
 }
 
 /// The transform that maps the 24 × 24 icon grid into `rect`, at `ICON` size.
@@ -828,6 +1149,8 @@ mod tests {
             zoom_percent: 100.0,
             background: Background::Checkerboard,
             nav_enabled: false,
+            edit: None,
+            menu: None,
             hovered: None,
             pressed: None,
             file_hovering: false,
@@ -887,6 +1210,109 @@ mod tests {
         let panel = layout.panel;
         assert_eq!(hit(&s, (panel.x as f32 + 1.0, panel.y as f32 + 1.0)), Some(Hit::Inert));
         assert_eq!(hit(&s, (5.0, 5.0)), None);
+    }
+
+    fn edit() -> EditScene {
+        EditScene { label: "Open in Inkscape".into(), label_size: (104.0, 17.7) }
+    }
+
+    fn menu(rows: &[(&str, bool)]) -> MenuScene {
+        MenuScene {
+            rows: rows.iter().map(|&(label, enabled)| MenuRow { label: label.into(), enabled }).collect(),
+            checked: Some(0),
+            highlighted: None,
+            text_width: 120.0,
+        }
+    }
+
+    #[test]
+    fn edit_button_is_in_the_top_right_corner() {
+        for scale in [1.0, 1.25, 2.0] {
+            let window = (1000, 700);
+            let layout = edit_layout(window, scale, &edit());
+            let right = window.0 as i32 - (layout.panel.x + layout.panel.w);
+            assert!((right as f32 - EDGE * scale).abs() <= 1.0, "{right} at {scale}");
+            assert!((layout.panel.y as f32 - EDGE * scale).abs() <= 1.0);
+            // The main part and the ▾ fill the panel side by side.
+            assert_eq!(layout.main.x, layout.panel.x);
+            assert_eq!(layout.main.x + layout.main.w, layout.arrow.x);
+            assert!((layout.arrow.x + layout.arrow.w - (layout.panel.x + layout.panel.w)).abs() <= 1);
+        }
+    }
+
+    #[test]
+    fn menu_hangs_under_the_button_inside_the_window() {
+        let rows = [("Inkscape", true), ("Visual Studio Code", true), ("Other app…", true)];
+        for scale in [1.0, 1.5] {
+            let window = (1000, 700);
+            let button = edit_layout(window, scale, &edit());
+            let layout = menu_layout(window, scale, &edit(), &menu(&rows));
+            let (panel, button_right) = (layout.panel, button.panel.x + button.panel.w);
+            assert!((panel.x + panel.w - button_right).abs() <= 1, "right-aligned at {scale}");
+            assert!(panel.y > button.panel.y + button.panel.h);
+            assert!(panel.x >= 0 && panel.x + panel.w <= window.0 as i32);
+            assert_eq!(layout.rows.len(), 3);
+            for row in &layout.rows {
+                assert!(row.x >= panel.x && row.x + row.w <= panel.x + panel.w);
+                assert!(row.y >= panel.y && row.y + row.h <= panel.y + panel.h);
+            }
+            // "Other app…" comes after a separator.
+            let separator = layout.separator.expect("a separator");
+            assert!(separator.y >= layout.rows[1].y + layout.rows[1].h && separator.y <= layout.rows[2].y);
+        }
+        // The widest label fits its row without being shortened.
+        for scale in [1.0, 1.25, 2.0] {
+            let mut wide = menu(&rows);
+            wide.text_width = 260.0;
+            let layout = menu_layout((1600, 900), scale, &edit(), &wide);
+            let room = layout.rows[0].w as f32 - (MENU_TEXT_X - MENU_PAD + INFO_PAD_X) * scale;
+            assert!(room >= 260.0 * scale, "{room} at {scale}");
+        }
+        // A single row needs no separator.
+        let layout = menu_layout((1000, 700), 1.0, &edit(), &menu(&[("Other app…", true)]));
+        assert_eq!(layout.separator, None);
+    }
+
+    #[test]
+    fn edit_button_hit_testing() {
+        let mut s = scene(Some(info()), 1.0);
+        s.edit = Some(edit());
+        let layout = edit_layout(s.window, 1.0, &edit());
+        assert_eq!(hit(&s, center(layout.main)), Some(Hit::Button(Button::Edit)));
+        assert_eq!(hit(&s, center(layout.arrow)), Some(Hit::Button(Button::EditMenu)));
+        // Without the button, the same point is just the picture.
+        s.edit = None;
+        assert_eq!(hit(&s, center(layout.main)), None);
+    }
+
+    #[test]
+    fn open_menu_hit_testing() {
+        let mut s = scene(Some(info()), 1.0);
+        s.edit = Some(edit());
+        s.menu = Some(menu(&[("Looking for apps…", false), ("Other app…", true)]));
+        let layout = menu_layout(s.window, 1.0, &edit(), s.menu.as_ref().unwrap());
+        assert_eq!(hit(&s, center(layout.rows[0])), Some(Hit::Inert));
+        assert_eq!(hit(&s, center(layout.rows[1])), Some(Hit::MenuItem(1)));
+        let panel = layout.panel;
+        assert_eq!(hit(&s, (panel.x as f32 + 1.0, panel.y as f32 + 1.0)), Some(Hit::Inert));
+        // The ▾ closes the menu again; anywhere else only dismisses it,
+        // even over the toolbar.
+        let arrow = edit_layout(s.window, 1.0, &edit()).arrow;
+        assert_eq!(hit(&s, center(arrow)), Some(Hit::Button(Button::EditMenu)));
+        assert_eq!(hit(&s, (5.0, 5.0)), Some(Hit::Dismiss));
+        let toolbar = toolbar_layout(s.window, 1.0);
+        assert_eq!(hit(&s, center(toolbar.buttons[0].1)), Some(Hit::Dismiss));
+    }
+
+    #[test]
+    fn info_bar_stays_clear_of_the_edit_button() {
+        let mut s = scene(Some(info()), 1.25);
+        let full = info_max_width(&s, 1.25);
+        s.edit = Some(edit());
+        let narrow = info_max_width(&s, 1.25);
+        let button = edit_layout(s.window, 1.25, &edit()).panel;
+        assert!((EDGE * 1.25) as i32 + narrow < button.x, "{narrow} reaches the button at {}", button.x);
+        assert!(narrow < full);
     }
 
     #[test]
@@ -979,10 +1405,25 @@ mod tests {
                 let mut s = scene(with_file.then(info), 1.5);
                 s.theme = theme;
                 s.hovered = Some(Button::Open);
+                if with_file {
+                    s.edit = Some(edit());
+                    s.menu = Some(menu(&[("Inkscape", true), ("Other app…", true)]));
+                }
                 let mut dst = vec![0; 1000 * 700];
                 Ui::default().draw(&text, &s, &mut dst);
                 assert!(dst.iter().any(|&p| p != 0));
             }
         }
+    }
+
+    #[test]
+    fn long_app_names_are_cut_at_the_end() {
+        let text = TextRenderer::new().unwrap();
+        let name = "Inkscape vector graphics editor";
+        assert_eq!(fit_text_end(&text, name, 13.0, 1000.0), name);
+        let short = fit_text_end(&text, name, 13.0, 100.0);
+        assert!(short.starts_with("Inkscape") && short.ends_with('…'), "{short}");
+        assert!(text.measure(&short, 13.0) <= 100.0);
+        assert_eq!(fit_text_end(&text, name, 13.0, 1.0), "…");
     }
 }

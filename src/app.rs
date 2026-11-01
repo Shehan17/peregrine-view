@@ -17,10 +17,11 @@ use winit::window::{CursorIcon, Fullscreen, Window, WindowId};
 use crate::AppEvent;
 use crate::icon::IconImages;
 use crate::loader::{self, Document, Source};
+use crate::platform::Editor;
 use crate::render::{self, Backdrop, Frame, Job, Renderer};
 use crate::text::TextRenderer;
 use crate::settings::{self, Settings};
-use crate::ui::{self, Background, Banner, Button, Hit, Info, Scene, Theme, Ui};
+use crate::ui::{self, Background, Banner, Button, EditScene, Hit, Info, MenuRow, MenuScene, Scene, Theme, Ui};
 use crate::watch::{self, FileWatcher};
 use crate::view::{self, Limits, View};
 
@@ -87,6 +88,17 @@ pub struct App {
     /// True from opening a file until its load finishes.
     loading: bool,
     dialog_open: bool,
+    /// The app the "Open in" button opens files in: the last one picked from its menu.
+    editor: Option<Editor>,
+    /// The apps that can open files with the extension `.0` (".svg"), once listed.
+    editors: Option<(String, Vec<Editor>)>,
+    /// True while the app menu under the "Open in" button is open.
+    menu_open: bool,
+    /// The menu row under the cursor, or picked with the arrow keys.
+    menu_highlight: Option<usize>,
+    /// The thread that lists apps and opens files in them, started when first needed.
+    #[cfg(windows)]
+    shell: Option<crate::platform::windows::Shell>,
     doc: Option<Document>,
     /// Counts opened documents, so renders of an older one can be dropped.
     doc_id: u64,
@@ -147,6 +159,12 @@ impl App {
             cursor_icon: CursorIcon::Default,
             loading: false,
             dialog_open: false,
+            editor: settings.editor.clone(),
+            editors: None,
+            menu_open: false,
+            menu_highlight: None,
+            #[cfg(windows)]
+            shell: None,
             doc: None,
             doc_id: 0,
             frame: None,
@@ -277,6 +295,12 @@ impl App {
         let old_id = self.doc_id;
         self.doc = Some(doc);
         self.doc_id += 1;
+        if self.editable_path().is_none() {
+            self.close_menu();
+        } else if self.current_editors().is_none() {
+            // List the apps now, so the menu opens with them.
+            self.list_editors();
+        }
         if self.load_is_reload {
             // Keep the zoom and position, and show the old picture until the new one is drawn.
             self.reload_of = Some(old_id);
@@ -311,8 +335,12 @@ impl App {
 
     fn cycle_background(&mut self) {
         self.background = self.background.next();
-        settings::save(Settings { background: self.background });
+        self.save_settings();
         self.style_changed();
+    }
+
+    fn save_settings(&self) {
+        settings::save(Settings { background: self.background, editor: self.editor.clone() });
     }
 
     fn set_theme(&mut self, theme: winit::window::Theme) {
@@ -341,6 +369,8 @@ impl App {
             zoom_percent: self.view.scale / self.actual_size_scale() * 100.0,
             background: self.background,
             nav_enabled: self.nav_path.is_some(),
+            edit: self.edit_scene(),
+            menu: self.menu_scene(),
             hovered: self.hovered,
             pressed: self.pressed,
             file_hovering: self.file_hovering,
@@ -351,6 +381,8 @@ impl App {
         let center = self.center();
         match button {
             Button::Open => self.open_dialog(),
+            Button::Edit => self.edit(),
+            Button::EditMenu => self.toggle_menu(),
             Button::Previous => self.go(false),
             Button::Next => self.go(true),
             Button::ZoomOut => self.zoom_at(1.0 / KEY_ZOOM, center),
@@ -381,9 +413,15 @@ impl App {
             self.hovered = hovered;
             self.request_redraw();
         }
+        if let Some(Hit::MenuItem(row)) = hit
+            && self.menu_highlight != Some(row)
+        {
+            self.menu_highlight = Some(row);
+            self.request_redraw();
+        }
         let icon = if self.drag_from.is_some() {
             CursorIcon::Grabbing
-        } else if hovered.is_some() {
+        } else if hovered.is_some() || matches!(hit, Some(Hit::MenuItem(_))) {
             CursorIcon::Pointer
         } else {
             CursorIcon::Default
@@ -414,6 +452,198 @@ impl App {
         match spawned {
             Ok(_) => self.dialog_open = true,
             Err(e) => eprintln!("could not start dialog thread: {e}"),
+        }
+    }
+
+    /// The open file, when the "Open in" button can open it in another app.
+    /// Pasted SVG code has no file, and so far only Windows lists the apps.
+    fn editable_path(&self) -> Option<&PathBuf> {
+        if !cfg!(windows) {
+            return None;
+        }
+        self.doc.as_ref()?.path.as_ref()
+    }
+
+    /// The extension the app list is for, like ".svg".
+    fn edit_ext(&self) -> Option<String> {
+        let ext = self.editable_path()?.extension();
+        Some(ext.map_or(".svg".into(), |ext| format!(".{}", ext.to_string_lossy().to_lowercase())))
+    }
+
+    /// The apps that can open the open file, once they are listed.
+    fn current_editors(&self) -> Option<&[Editor]> {
+        let ext = self.edit_ext()?;
+        self.editors.as_ref().filter(|(listed, _)| *listed == ext).map(|(_, list)| list.as_slice())
+    }
+
+    /// The app menu's rows, and what each one does.
+    fn menu_rows(&self) -> Vec<(MenuRow, MenuAction)> {
+        let row = |label: &str, enabled| MenuRow { label: label.to_owned(), enabled };
+        let mut rows: Vec<(MenuRow, MenuAction)> = match self.current_editors() {
+            Some(list) => list.iter().enumerate().map(|(i, e)| (row(&e.name, true), MenuAction::Editor(i))).collect(),
+            None => vec![(row("Looking for apps…", false), MenuAction::None)],
+        };
+        rows.push((row("Other app…", true), MenuAction::OtherApp));
+        rows
+    }
+
+    fn edit_scene(&self) -> Option<EditScene> {
+        let text = self.text.as_ref()?;
+        self.editable_path()?;
+        let label = match &self.editor {
+            Some(editor) => format!("Open in {}", editor.name),
+            None => "Open with…".to_owned(),
+        };
+        Some(EditScene { label_size: ui::measure(text, &label), label })
+    }
+
+    fn menu_scene(&self) -> Option<MenuScene> {
+        if !self.menu_open {
+            return None;
+        }
+        let text = self.text.as_ref()?;
+        self.editable_path()?;
+        let rows = self.menu_rows();
+        let editors = self.current_editors().unwrap_or_default();
+        let checked = rows.iter().position(|(_, action)| match action {
+            MenuAction::Editor(i) => self.editor.as_ref().is_some_and(|e| e.id == editors[*i].id),
+            _ => false,
+        });
+        let text_width = rows.iter().map(|(row, _)| ui::measure(text, &row.label).0).fold(0.0, f32::max);
+        let rows = rows.into_iter().map(|(row, _)| row).collect();
+        Some(MenuScene { rows, checked, highlighted: self.menu_highlight, text_width })
+    }
+
+    /// The menu row to start on: the default app, or else the first one.
+    fn first_highlight(&self) -> Option<usize> {
+        let menu = self.menu_scene()?;
+        menu.checked.or_else(|| menu.rows.iter().position(|row| row.enabled))
+    }
+
+    #[cfg(windows)]
+    fn shell(&mut self) -> Option<&crate::platform::windows::Shell> {
+        if self.shell.is_none() {
+            match crate::platform::windows::Shell::spawn(self.proxy.clone()) {
+                Ok(shell) => self.shell = Some(shell),
+                Err(e) => eprintln!("could not start shell thread: {e}"),
+            }
+        }
+        self.shell.as_ref()
+    }
+
+    /// Asks for the apps that can open the open file.
+    fn list_editors(&mut self) {
+        #[cfg(windows)]
+        if let Some(ext) = self.edit_ext()
+            && let Some(shell) = self.shell()
+        {
+            shell.list(ext);
+        }
+    }
+
+    fn open_in(&mut self, editor: Editor) {
+        #[cfg(windows)]
+        if let Some(path) = self.editable_path().cloned()
+            && let Some(shell) = self.shell()
+        {
+            shell.open(editor, path);
+        }
+        #[cfg(not(windows))]
+        let _ = editor;
+    }
+
+    /// The main part of the "Open in" button: opens the file in the default
+    /// app, or shows the menu to pick one.
+    fn edit(&mut self) {
+        if self.editable_path().is_none() {
+            return;
+        }
+        match self.editor.clone() {
+            Some(editor) => self.open_in(editor),
+            None => self.open_menu(),
+        }
+    }
+
+    fn open_menu(&mut self) {
+        if self.menu_open || self.editable_path().is_none() {
+            return;
+        }
+        self.menu_open = true;
+        self.menu_highlight = self.first_highlight();
+        // List again each time, so newly installed apps show up.
+        self.list_editors();
+        self.update_hover();
+        self.request_redraw();
+    }
+
+    fn close_menu(&mut self) {
+        if self.menu_open {
+            self.menu_open = false;
+            self.menu_highlight = None;
+            self.update_hover();
+            self.request_redraw();
+        }
+    }
+
+    fn toggle_menu(&mut self) {
+        if self.menu_open { self.close_menu() } else { self.open_menu() }
+    }
+
+    /// Does what app menu row `index` says. A picked app becomes the default.
+    fn pick(&mut self, index: usize) {
+        let action = self.menu_rows().get(index).map(|&(_, action)| action);
+        self.close_menu();
+        match action {
+            Some(MenuAction::Editor(i)) => {
+                if let Some(editor) = self.current_editors().and_then(|list| list.get(i)).cloned() {
+                    self.editor = Some(editor.clone());
+                    self.save_settings();
+                    self.open_in(editor);
+                }
+            }
+            Some(MenuAction::OtherApp) => self.open_with(),
+            _ => {}
+        }
+    }
+
+    /// Moves the menu highlight to the next row down or up that can be picked.
+    fn move_highlight(&mut self, down: bool) {
+        let rows = self.menu_rows();
+        let enabled: Vec<usize> = (0..rows.len()).filter(|&i| rows[i].0.enabled).collect();
+        let count = enabled.len();
+        if count == 0 {
+            return;
+        }
+        let at = self.menu_highlight.and_then(|h| enabled.iter().position(|&i| i == h));
+        let next = match (at, down) {
+            (Some(p), true) => enabled[(p + 1) % count],
+            (Some(p), false) => enabled[(p + count - 1) % count],
+            (None, true) => enabled[0],
+            (None, false) => enabled[count - 1],
+        };
+        self.menu_highlight = Some(next);
+        self.request_redraw();
+    }
+
+    /// Shows Windows' own chooser, to open the file once in any other app.
+    fn open_with(&mut self) {
+        #[cfg(windows)]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+            let Some(gfx) = &self.gfx else { return };
+            let Some(path) = self.editable_path().cloned() else { return };
+            if self.dialog_open {
+                return;
+            }
+            let hwnd = match gfx.window.window_handle().map(|handle| handle.as_raw()) {
+                Ok(RawWindowHandle::Win32(handle)) => handle.hwnd.get(),
+                _ => 0,
+            };
+            match crate::platform::windows::spawn_open_with(hwnd, path, self.proxy.clone()) {
+                Ok(()) => self.dialog_open = true,
+                Err(e) => eprintln!("could not start open-with thread: {e}"),
+            }
         }
     }
 
@@ -578,6 +808,15 @@ impl App {
                     self.request_redraw();
                     return;
                 }
+                Some(Hit::MenuItem(row)) if button == MouseButton::Left => {
+                    self.pick(row);
+                    return;
+                }
+                // A click outside the open menu only closes it.
+                Some(Hit::Dismiss) => {
+                    self.close_menu();
+                    return;
+                }
                 Some(_) => return,
                 None => {}
             }
@@ -631,6 +870,30 @@ impl App {
         if event.state != ElementState::Pressed {
             return;
         }
+        // The open menu takes the keys it uses first.
+        if self.menu_open {
+            match &event.logical_key {
+                Key::Named(NamedKey::ArrowDown) => {
+                    self.move_highlight(true);
+                    return;
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.move_highlight(false);
+                    return;
+                }
+                Key::Named(NamedKey::Enter) => {
+                    if let Some(row) = self.menu_highlight {
+                        self.pick(row);
+                    }
+                    return;
+                }
+                Key::Named(NamedKey::Escape) => {
+                    self.close_menu();
+                    return;
+                }
+                _ => {}
+            }
+        }
         let m = self.modifiers;
         // Cmd on macOS, Ctrl elsewhere.
         let primary = if cfg!(target_os = "macos") { m.super_key() } else { m.control_key() };
@@ -667,6 +930,8 @@ impl App {
                 "1" => self.toggle_actual_size(),
                 "b" | "B" => self.cycle_background(),
                 "r" | "R" => self.reload(),
+                "e" | "E" if !event.repeat && m.shift_key() => self.toggle_menu(),
+                "e" | "E" if !event.repeat => self.edit(),
                 _ => {}
             },
             // The arrows move the view, so the picture moves the other way.
@@ -803,6 +1068,17 @@ impl App {
     }
 }
 
+/// What a row of the app menu does.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MenuAction {
+    /// Open the file in the listed app with this index.
+    Editor(usize),
+    /// Show Windows' own chooser.
+    OtherApp,
+    /// Nothing: a placeholder row.
+    None,
+}
+
 /// The document, view, window size and colors a frame is drawn for.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Target {
@@ -899,6 +1175,37 @@ impl ApplicationHandler<AppEvent> for App {
             AppEvent::OpenFile(path) => self.open(Source::File(path)),
             #[cfg(target_os = "linux")]
             AppEvent::SystemTheme(theme) => self.set_theme(theme),
+            #[cfg(windows)]
+            AppEvent::OpenWithClosed(ok) => {
+                self.dialog_open = false;
+                if !ok {
+                    self.show_error("This file can't be opened in another app.".into());
+                }
+            }
+            #[cfg(windows)]
+            AppEvent::Editors { ext, list } => {
+                self.editors = Some((ext, list));
+                if self.menu_open {
+                    // The rows changed, so start again on the default app.
+                    self.menu_highlight = self.first_highlight();
+                    self.update_hover();
+                    self.request_redraw();
+                }
+            }
+            #[cfg(windows)]
+            AppEvent::EditorOpened { editor, result } => {
+                use crate::platform::windows::OpenError;
+                match result {
+                    Ok(()) => {}
+                    Err(OpenError::NotInstalled) => {
+                        self.show_error(format!("{} isn't installed any more. Pick another app.", editor.name));
+                        self.open_menu();
+                    }
+                    Err(OpenError::Failed(_)) => {
+                        self.show_error(format!("This file can't be opened in {}.", editor.name));
+                    }
+                }
+            }
         }
     }
 
@@ -953,7 +1260,10 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::CursorMoved { position, .. } => self.on_cursor_moved(position),
             // A release can be missed while another window has focus.
-            WindowEvent::Focused(false) => self.drag_from = None,
+            WindowEvent::Focused(false) => {
+                self.drag_from = None;
+                self.close_menu();
+            }
             // Linux sends no ThemeChanged, so check again when the user comes back.
             #[cfg(target_os = "linux")]
             WindowEvent::Focused(true) => {

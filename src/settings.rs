@@ -1,17 +1,20 @@
-//! Saves the background choice in the user's config folder.
+//! Saves the background choice and the default editor in the user's config folder.
 
 use std::path::PathBuf;
 
+use crate::platform::Editor;
 use crate::ui::Background;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub background: Background,
+    /// The app the "Open in" button uses: the last one picked from its menu.
+    pub editor: Option<Editor>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { background: Background::Checkerboard }
+        Settings { background: Background::Checkerboard, editor: None }
     }
 }
 
@@ -64,16 +67,25 @@ pub fn save(settings: Settings) {
 
 fn parse(text: &str) -> Settings {
     let mut settings = Settings::default();
+    let (mut editor_id, mut editor_name) = (None, None);
     for line in text.lines() {
         let Some((key, value)) = line.split_once('=') else { continue };
-        if key.trim() == "background" {
-            match value.trim() {
+        let value = value.trim();
+        match key.trim() {
+            "background" => match value {
                 "checkerboard" => settings.background = Background::Checkerboard,
                 "white" => settings.background = Background::White,
                 "dark" => settings.background = Background::Dark,
                 _ => {}
-            }
+            },
+            "editor" if !value.is_empty() => editor_id = Some(value.to_owned()),
+            "editor_name" if !value.is_empty() => editor_name = Some(value.to_owned()),
+            _ => {}
         }
+    }
+    // An editor needs both lines.
+    if let (Some(id), Some(name)) = (editor_id, editor_name) {
+        settings.editor = Some(Editor { id, name });
     }
     settings
 }
@@ -84,7 +96,13 @@ fn serialize(settings: &Settings) -> String {
         Background::White => "white",
         Background::Dark => "dark",
     };
-    format!("background={background}\n")
+    let mut text = format!("background={background}\n");
+    if let Some(editor) = &settings.editor {
+        // A line break would split a value; real program paths and names have none.
+        let line = |s: &str| s.replace(['\r', '\n'], " ");
+        text.push_str(&format!("editor={}\neditor_name={}\n", line(&editor.id), line(&editor.name)));
+    }
+    text
 }
 
 #[cfg(test)]
@@ -94,9 +112,25 @@ mod tests {
     #[test]
     fn round_trips() {
         for background in [Background::Checkerboard, Background::White, Background::Dark] {
-            let settings = Settings { background };
+            let settings = Settings { background, editor: None };
             assert_eq!(parse(&serialize(&settings)), settings);
         }
+        let editor = Editor {
+            id: r"C:\Program Files\Inkscape\bin\inkscape.exe".into(),
+            name: "Inkscape vector graphics editor".into(),
+        };
+        let settings = Settings { background: Background::Dark, editor: Some(editor) };
+        assert_eq!(parse(&serialize(&settings)), settings);
+    }
+
+    #[test]
+    fn an_editor_needs_an_id_and_a_name() {
+        assert_eq!(parse("editor=C:\\a.exe\n").editor, None);
+        assert_eq!(parse("editor_name=A\n").editor, None);
+        assert_eq!(parse("editor=\neditor_name=A\n").editor, None);
+        // Store app IDs can contain `=`; only the first one splits the line.
+        let editor = parse("editor=App!a=b\neditor_name=A\n").editor;
+        assert_eq!(editor.map(|e| e.id), Some("App!a=b".into()));
     }
 
     #[test]
