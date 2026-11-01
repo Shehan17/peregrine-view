@@ -2,10 +2,13 @@
 
 mod app;
 mod loader;
+mod nav;
 mod render;
+mod settings;
 mod text;
 mod ui;
 mod view;
+mod watch;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -14,7 +17,12 @@ use winit::event_loop::{ControlFlow, EventLoop};
 
 /// Messages from background threads to the event loop.
 pub enum AppEvent {
-    Loaded { id: u64, result: Result<loader::Document, loader::LoadError> },
+    /// A load finished. `path` is the file it tried, when there was one.
+    Loaded { id: u64, path: Option<PathBuf>, result: Result<loader::Document, loader::LoadError> },
+    /// Next or Previous picked this file; its load is still running.
+    Resolved { id: u64, path: PathBuf },
+    /// The open file changed on disk.
+    FileChanged(PathBuf),
     Rendered(render::Frame),
     /// The Open dialog closed, with the chosen file if there is one.
     DialogClosed(Option<PathBuf>),

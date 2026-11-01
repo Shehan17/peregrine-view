@@ -12,18 +12,23 @@ use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, Window
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
-use winit::window::{CursorIcon, Window, WindowId};
+use winit::window::{CursorIcon, Fullscreen, Window, WindowId};
 
 use crate::AppEvent;
 use crate::loader::{self, Document, Source};
 use crate::render::{self, Backdrop, Frame, Job, Renderer};
 use crate::text::TextRenderer;
+use crate::settings::{self, Settings};
 use crate::ui::{self, Background, Banner, Button, Hit, Info, Scene, Theme, Ui};
+use crate::watch::{self, FileWatcher};
 use crate::view::{self, Limits, View};
 
 const APP_NAME: &str = "PeregrineView";
 /// Space around the picture in fit mode, in logical pixels.
 const FIT_MARGIN: f64 = 16.0;
+/// Editors often write a file in several steps; wait this long after the
+/// last change before reloading.
+const RELOAD_DELAY: Duration = Duration::from_millis(200);
 /// How long input must stop before the sharp render starts.
 const SETTLE_DELAY: Duration = Duration::from_millis(100);
 /// Zoom per mouse wheel notch.
@@ -48,6 +53,22 @@ pub struct App {
     proxy: EventLoopProxy<AppEvent>,
     /// Counts started loads, so a slower, older load can't replace a newer one.
     load_id: u64,
+    /// True when the load with `load_id` reloads the open file, which keeps the view.
+    load_is_reload: bool,
+    /// After a reload, frames of the old version can still be shown as a
+    /// preview until the new one is drawn.
+    reload_of: Option<u64>,
+    /// When to reload the open file after it changed on disk.
+    reload_at: Option<Instant>,
+    watcher: Option<FileWatcher>,
+    watched: Option<PathBuf>,
+    /// Where Next and Previous count from: the last file opened or tried.
+    nav_path: Option<PathBuf>,
+    /// True while the loader is picking the next or previous file.
+    nav_resolving: bool,
+    /// Next (+1) and Previous (-1) presses made while picking, done after it.
+    nav_queued: i32,
+    exit_requested: bool,
     text: Option<TextRenderer>,
     ui: Ui,
     banner: Option<Banner>,
@@ -95,17 +116,27 @@ impl App {
         proxy: EventLoopProxy<AppEvent>,
         path: Option<PathBuf>,
     ) -> Self {
+        let settings = settings::load();
         let mut app = Self {
             started,
             gfx: None,
             renderer,
             proxy,
             load_id: 0,
+            load_is_reload: false,
+            reload_of: None,
+            reload_at: None,
+            watcher: None,
+            watched: None,
+            nav_path: None,
+            nav_resolving: false,
+            nav_queued: 0,
+            exit_requested: false,
             text: None,
             ui: Ui::default(),
             banner: None,
             theme: Theme::Light,
-            background: Background::Checkerboard,
+            background: settings.background,
             hovered: None,
             pressed: None,
             file_hovering: false,
@@ -135,9 +166,115 @@ impl App {
     }
 
     fn open(&mut self, source: Source) {
+        self.start_load(source, false);
+    }
+
+    fn start_load(&mut self, source: Source, reload: bool) {
+        // Absolute paths keep the folder for Next, Previous and the watcher.
+        let source = match source {
+            Source::File(path) => Source::File(std::path::absolute(&path).unwrap_or(path)),
+            source => source,
+        };
         self.load_id += 1;
+        self.load_is_reload = reload;
+        self.nav_resolving = false;
+        self.nav_queued = 0;
         self.loading = true;
         loader::spawn_load(self.load_id, source, self.proxy.clone());
+    }
+
+    /// Loads the open file again, keeping the zoom and position.
+    fn reload(&mut self) {
+        self.reload_at = None;
+        if let Some(path) = self.doc.as_ref().and_then(|doc| doc.path.clone()) {
+            self.start_load(Source::File(path), true);
+        }
+    }
+
+    /// Opens the next or previous SVG in the folder.
+    fn go(&mut self, forward: bool) {
+        // Until the loader has picked a file, count presses instead of
+        // starting again from the same place.
+        if self.nav_resolving {
+            self.nav_queued += if forward { 1 } else { -1 };
+            return;
+        }
+        if let Some(from) = self.nav_path.clone() {
+            self.open(Source::Neighbor { from, forward });
+            self.nav_resolving = true;
+        }
+    }
+
+    fn on_resolved(&mut self, path: PathBuf) {
+        self.nav_path = Some(path);
+        self.nav_resolving = false;
+        if self.nav_queued != 0 {
+            let forward = self.nav_queued > 0;
+            let queued = self.nav_queued - self.nav_queued.signum();
+            self.go(forward);
+            self.nav_queued = queued;
+        }
+    }
+
+    fn toggle_fullscreen(&mut self) {
+        if let Some(gfx) = &self.gfx {
+            let fullscreen = gfx.window.fullscreen().is_none().then_some(Fullscreen::Borderless(None));
+            gfx.window.set_fullscreen(fullscreen);
+        }
+    }
+
+    fn leave_fullscreen(&mut self) {
+        if let Some(gfx) = &self.gfx
+            && gfx.window.fullscreen().is_some()
+        {
+            gfx.window.set_fullscreen(None);
+        }
+    }
+
+    fn on_loaded(&mut self, path: Option<PathBuf>, result: Result<Document, loader::LoadError>) {
+        self.loading = false;
+        self.nav_resolving = false;
+        self.nav_queued = 0;
+        if path.is_some() {
+            self.nav_path = path;
+        }
+        let doc = match result {
+            Ok(doc) => doc,
+            // The previous picture stays on screen.
+            Err(e) => {
+                self.show_error(e.to_string());
+                return;
+            }
+        };
+        if let Some(gfx) = &self.gfx {
+            gfx.window.set_title(&format!("{} – {APP_NAME}", doc.name));
+        }
+        // A good file clears any error about the one before.
+        self.banner = None;
+
+        if doc.path != self.watched {
+            self.watched = doc.path.clone();
+            self.watcher = None;
+            self.watcher = doc.path.as_ref().and_then(|path| watch::watch(path, self.proxy.clone()));
+        }
+
+        let old_id = self.doc_id;
+        self.doc = Some(doc);
+        self.doc_id += 1;
+        if self.load_is_reload {
+            // Keep the zoom and position, and show the old picture until the new one is drawn.
+            self.reload_of = Some(old_id);
+            if self.fit_mode {
+                self.refit();
+            } else {
+                self.settle_at = Some(Instant::now());
+                self.request_redraw();
+            }
+        } else {
+            self.reload_of = None;
+            self.frame = None;
+            self.refit();
+        }
     }
 
     fn show_error(&mut self, message: String) {
@@ -158,6 +295,7 @@ impl App {
 
     fn cycle_background(&mut self) {
         self.background = self.background.next();
+        settings::save(Settings { background: self.background });
         self.style_changed();
     }
 
@@ -186,7 +324,7 @@ impl App {
             show_empty: !self.loading,
             zoom_percent: self.view.scale / self.actual_size_scale() * 100.0,
             background: self.background,
-            nav_enabled: false,
+            nav_enabled: self.nav_path.is_some(),
             hovered: self.hovered,
             pressed: self.pressed,
             file_hovering: self.file_hovering,
@@ -197,8 +335,8 @@ impl App {
         let center = self.center();
         match button {
             Button::Open => self.open_dialog(),
-            // Folder navigation comes in milestone 6; the buttons stay disabled until then.
-            Button::Previous | Button::Next => {}
+            Button::Previous => self.go(false),
+            Button::Next => self.go(true),
             Button::ZoomOut => self.zoom_at(1.0 / KEY_ZOOM, center),
             Button::Zoom => self.toggle_actual_size(),
             Button::ZoomIn => self.zoom_at(KEY_ZOOM, center),
@@ -485,6 +623,7 @@ impl App {
                 match c.to_lowercase().as_str() {
                     "o" => self.open_dialog(),
                     "v" => self.paste(),
+                    "w" | "q" => self.exit_requested = true,
                     _ => {}
                 }
             }
@@ -502,6 +641,7 @@ impl App {
                 "0" | "f" | "F" => self.refit(),
                 "1" => self.toggle_actual_size(),
                 "b" | "B" => self.cycle_background(),
+                "r" | "R" => self.reload(),
                 _ => {}
             },
             // The arrows move the view, so the picture moves the other way.
@@ -509,6 +649,10 @@ impl App {
             Key::Named(NamedKey::ArrowRight) => self.pan(-step, 0.0),
             Key::Named(NamedKey::ArrowUp) => self.pan(0.0, step),
             Key::Named(NamedKey::ArrowDown) => self.pan(0.0, -step),
+            Key::Named(NamedKey::PageDown | NamedKey::Space) => self.go(true),
+            Key::Named(NamedKey::PageUp | NamedKey::Backspace) => self.go(false),
+            Key::Named(NamedKey::F11) => self.toggle_fullscreen(),
+            Key::Named(NamedKey::Escape) => self.leave_fullscreen(),
             _ => {}
         }
     }
@@ -602,7 +746,7 @@ impl App {
                 buffer.copy_from_slice(&f.pixels);
                 true
             }
-            Some(f) if f.doc == self.doc_id => {
+            Some(f) if f.doc == self.doc_id || Some(f.doc) == self.reload_of => {
                 let from = (f.width, f.height);
                 render::blit_preview(&f.pixels, from, f.view, &mut buffer, size, self.view, canvas);
                 false
@@ -699,22 +843,12 @@ impl ApplicationHandler<AppEvent> for App {
             AppEvent::Loaded { id, .. } if id != self.load_id => {
                 eprintln!("load dropped: a newer one was started");
             }
-            AppEvent::Loaded { result, .. } => {
-                self.loading = false;
-                match result {
-                    Ok(doc) => {
-                        if let Some(gfx) = &self.gfx {
-                            gfx.window.set_title(&format!("{} – {APP_NAME}", doc.name));
-                        }
-                        // A good file clears any error about the one before.
-                        self.banner = None;
-                        self.doc = Some(doc);
-                        self.doc_id += 1;
-                        self.frame = None;
-                        self.refit();
-                    }
-                    // The previous picture stays on screen.
-                    Err(e) => self.show_error(e.to_string()),
+            AppEvent::Loaded { path, result, .. } => self.on_loaded(path, result),
+            AppEvent::Resolved { id, path } if id == self.load_id => self.on_resolved(path),
+            AppEvent::Resolved { .. } => {}
+            AppEvent::FileChanged(path) => {
+                if self.doc.as_ref().is_some_and(|doc| doc.path.as_ref() == Some(&path)) {
+                    self.reload_at = Some(Instant::now() + RELOAD_DELAY);
                 }
             }
             AppEvent::DialogClosed(path) => {
@@ -737,7 +871,14 @@ impl ApplicationHandler<AppEvent> for App {
             self.banner = None;
             self.request_redraw();
         }
-        let next = [self.settle_at, self.banner.as_ref().map(|b| b.until)].into_iter().flatten().min();
+        if self.reload_at.is_some_and(|at| now >= at) {
+            eprintln!("file changed on disk, reloading");
+            self.reload();
+        }
+        let next = [self.settle_at, self.banner.as_ref().map(|b| b.until), self.reload_at]
+            .into_iter()
+            .flatten()
+            .min();
         event_loop.set_control_flow(match next {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
@@ -777,7 +918,12 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::PinchGesture { delta, .. } if delta.is_finite() => {
                 self.zoom_at((1.0 + delta as f32).max(0.01), self.cursor);
             }
-            WindowEvent::KeyboardInput { event, .. } => self.on_key(&event),
+            WindowEvent::KeyboardInput { event, .. } => {
+                self.on_key(&event);
+                if self.exit_requested {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
         }

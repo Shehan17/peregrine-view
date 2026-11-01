@@ -21,6 +21,8 @@ pub enum Source {
     File(PathBuf),
     /// SVG code pasted from the clipboard.
     Text(String),
+    /// The next or previous SVG in the folder of `from`.
+    Neighbor { from: PathBuf, forward: bool },
 }
 
 pub struct Document {
@@ -46,6 +48,7 @@ pub enum LoadError {
     Broken { line: u32 },
     Empty,
     TooManyElements,
+    NoOtherFiles,
 }
 
 impl fmt::Display for LoadError {
@@ -58,6 +61,7 @@ impl fmt::Display for LoadError {
             LoadError::Broken { line } => write!(f, "This SVG has broken code near line {line}."),
             LoadError::Empty => write!(f, "This SVG has nothing to draw."),
             LoadError::TooManyElements => write!(f, "This SVG has too many elements to draw."),
+            LoadError::NoOtherFiles => write!(f, "There are no other SVGs in this folder."),
         }
     }
 }
@@ -68,19 +72,53 @@ pub fn spawn_load(id: u64, source: Source, proxy: EventLoopProxy<AppEvent>) {
     let spawned = std::thread::Builder::new()
         .name("loader".into())
         .spawn(move || {
-            let result = load(&source);
+            let (path, result) = resolve_and_load(source, |path| {
+                // Say which file Next or Previous picked before the slow parse.
+                let _ = proxy.send_event(AppEvent::Resolved { id, path: path.to_path_buf() });
+            });
             if let Err(e) = &result {
-                let what = match &source {
-                    Source::File(path) => path.display().to_string(),
-                    Source::Text(_) => "pasted text".into(),
-                };
+                let what = path.as_ref().map_or("pasted text".into(), |p| p.display().to_string());
                 eprintln!("load failed: {what}: {e:?}");
             }
             // Fails only when the event loop has already exited.
-            let _ = proxy.send_event(AppEvent::Loaded { id, result });
+            let _ = proxy.send_event(AppEvent::Loaded { id, path, result });
         });
     if let Err(e) = spawned {
         eprintln!("could not start loader thread: {e}");
+    }
+}
+
+/// Finds the file to open, then loads it. Returns the file it tried.
+fn resolve_and_load(
+    source: Source,
+    resolved: impl FnOnce(&Path),
+) -> (Option<PathBuf>, Result<Document, LoadError>) {
+    let source = match source {
+        Source::Neighbor { from, forward } => match neighbor_of(&from, forward) {
+            Ok(path) => {
+                resolved(&path);
+                Source::File(path)
+            }
+            Err(e) => return (None, Err(e)),
+        },
+        source => source,
+    };
+    let path = match &source {
+        Source::File(path) => Some(path.clone()),
+        _ => None,
+    };
+    (path, load(&source))
+}
+
+fn neighbor_of(from: &Path, forward: bool) -> Result<PathBuf, LoadError> {
+    let dir = from.parent().ok_or(LoadError::NoOtherFiles)?;
+    let files = crate::nav::list_svgs(dir).map_err(|e| {
+        eprintln!("could not list {}: {e}", dir.display());
+        LoadError::NotFound
+    })?;
+    match crate::nav::neighbor(&files, from, forward) {
+        Some(next) if next.file_name() != from.file_name() => Ok(next.clone()),
+        _ => Err(LoadError::NoOtherFiles),
     }
 }
 
@@ -106,6 +144,8 @@ pub fn load(source: &Source) -> Result<Document, LoadError> {
             doc
         }
         Source::Text(text) => parse(text, None, "Pasted SVG".into(), None)?,
+        // Resolved to a file before loading.
+        Source::Neighbor { .. } => return Err(LoadError::NoOtherFiles),
     };
     eprintln!("parsed {} in {:?}", doc.name, start.elapsed());
     Ok(doc)

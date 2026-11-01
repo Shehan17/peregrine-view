@@ -15,6 +15,7 @@ rfd = "0.17"
 ab_glyph = { version = "0.2.32", default-features = false, features = ["std"] }
 # For clipboard paste. Not in the spec's crate list; there is no std way to read the clipboard.
 arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
+notify = "8.2"
 
 [profile.release]
 opt-level = 3
