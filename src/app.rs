@@ -15,6 +15,7 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{CursorIcon, Fullscreen, Window, WindowId};
 
 use crate::AppEvent;
+use crate::icon::IconImages;
 use crate::loader::{self, Document, Source};
 use crate::render::{self, Backdrop, Frame, Job, Renderer};
 use crate::text::TextRenderer;
@@ -69,6 +70,8 @@ pub struct App {
     /// Next (+1) and Previous (-1) presses made while picking, done after it.
     nav_queued: i32,
     exit_requested: bool,
+    /// The app icon, kept until the window exists if it is ready first.
+    icons: Option<IconImages>,
     text: Option<TextRenderer>,
     ui: Ui,
     banner: Option<Banner>,
@@ -132,6 +135,7 @@ impl App {
             nav_resolving: false,
             nav_queued: 0,
             exit_requested: false,
+            icons: None,
             text: None,
             ui: Ui::default(),
             banner: None,
@@ -214,6 +218,18 @@ impl App {
             self.go(forward);
             self.nav_queued = queued;
         }
+    }
+
+    /// Puts the app icon on the title bar and the taskbar button.
+    fn apply_icons(&mut self) {
+        let (Some(gfx), Some(icons)) = (&self.gfx, &self.icons) else { return };
+        gfx.window.set_window_icon(icons.small.to_icon());
+        #[cfg(windows)]
+        {
+            use winit::platform::windows::WindowExtWindows;
+            gfx.window.set_taskbar_icon(icons.large.to_icon());
+        }
+        self.icons = None;
     }
 
     fn toggle_fullscreen(&mut self) {
@@ -834,6 +850,7 @@ impl ApplicationHandler<AppEvent> for App {
         self.viewport = window.inner_size();
         self.scale_factor = window.scale_factor();
         self.gfx = Some(Gfx { window, surface });
+        self.apply_icons();
         eprintln!("window created {:?} after start", self.started.elapsed());
         self.refit();
     }
@@ -858,6 +875,10 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             AppEvent::Rendered(frame) => self.on_rendered(frame),
+            AppEvent::Icons(icons) => {
+                self.icons = Some(icons);
+                self.apply_icons();
+            }
         }
     }
 

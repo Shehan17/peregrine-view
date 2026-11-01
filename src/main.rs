@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod icon;
 mod loader;
 mod nav;
 mod render;
@@ -21,6 +22,8 @@ pub enum AppEvent {
     Loaded { id: u64, path: Option<PathBuf>, result: Result<loader::Document, loader::LoadError> },
     /// Next or Previous picked this file; its load is still running.
     Resolved { id: u64, path: PathBuf },
+    /// The app icon is ready to put on the window.
+    Icons(icon::IconImages),
     /// The open file changed on disk.
     FileChanged(PathBuf),
     Rendered(render::Frame),
@@ -48,6 +51,8 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    icon::spawn_load(event_loop.create_proxy());
 
     // The app starts parsing the file right away, while the window is being created.
     let mut app = app::App::new(start, renderer, event_loop.create_proxy(), path);
