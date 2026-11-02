@@ -31,8 +31,8 @@ const INFO_PAD_Y: f32 = 7.0;
 const EDIT_ARROW: f32 = 28.0;
 /// The longest "Open in" label; longer ones are shortened with "…".
 const EDIT_MAX_LABEL: f32 = 240.0;
-/// Space kept between the info bar and the "Open in" button.
-const EDIT_GAP: f32 = 8.0;
+/// Space between the info bar and the "Open in" button under it.
+const EDIT_GAP: f32 = 6.0;
 const MENU_GAP: f32 = 4.0;
 const MENU_PAD: f32 = 5.0;
 const MENU_ROW: f32 = 30.0;
@@ -304,7 +304,7 @@ pub struct Scene {
     pub file_hovering: bool,
 }
 
-/// The "Open in <app>" button in the top right corner.
+/// The "Open in <app>" button under the info bar.
 pub struct EditScene {
     pub label: String,
     /// The label's width and line height in logical pixels, from `measure`.
@@ -336,12 +336,13 @@ pub fn measure(text: &TextRenderer, s: &str) -> (f32, f32) {
 }
 
 /// Where the "Open in" button goes, in logical pixels: (x, y, main part
-/// width, height). It is as tall as the info bar.
+/// width, height). It is as tall as the info bar, and sits under it.
 fn edit_box(window_w: f32, edit: &EditScene) -> (f32, f32, f32, f32) {
     let (label_w, line_h) = edit.label_size;
     let main_w = (label_w.min(EDIT_MAX_LABEL) + 2.0 * INFO_PAD_X).ceil();
+    let h = line_h + 2.0 * INFO_PAD_Y;
     let x = (window_w - EDGE - main_w - EDIT_ARROW).round();
-    (x, EDGE, main_w, line_h + 2.0 * INFO_PAD_Y)
+    (x, EDGE + h + EDIT_GAP, main_w, h)
 }
 
 #[derive(Debug, PartialEq)]
@@ -351,7 +352,8 @@ pub struct EditLayout {
     pub arrow: Rect,
 }
 
-/// The "Open in" button, in the top right corner of a `window`-sized area.
+/// The "Open in" button, under the info bar in the top right corner of a
+/// `window`-sized area.
 pub fn edit_layout(window: (u32, u32), scale: f32, edit: &EditScene) -> EditLayout {
     let (x, y, main_w, h) = edit_box(window.0 as f32 / scale, edit);
     EditLayout {
@@ -400,14 +402,15 @@ pub fn menu_layout(window: (u32, u32), scale: f32, edit: &EditScene, menu: &Menu
     layout
 }
 
-/// How wide the info bar may be, in window pixels, so it stays clear of the
-/// "Open in" button.
-fn info_max_width(scene: &Scene, scale: f32) -> i32 {
-    let mut max_width = scene.window.0 as f32 - 2.0 * EDGE * scale;
-    if let Some(edit) = &scene.edit {
-        max_width -= edit_layout(scene.window, scale, edit).panel.w as f32 + EDIT_GAP * scale;
-    }
-    max_width.max(40.0 * scale) as i32
+/// How wide the info bar may be, in window pixels.
+fn info_max_width(window_w: u32, scale: f32) -> i32 {
+    (window_w as f32 - 2.0 * EDGE * scale).max(40.0 * scale) as i32
+}
+
+/// Where an info bar `width` window pixels wide goes: in the top right corner.
+fn info_origin(window_w: u32, width: u32, scale: f32) -> (i64, i64) {
+    let edge = (EDGE * scale).round() as i64;
+    (i64::from(window_w) - edge - i64::from(width), edge)
 }
 
 /// What is under the cursor.
@@ -592,12 +595,12 @@ impl Ui {
         let palette = scene.theme.palette();
         if let Some(info) = &scene.info {
             let label = info_label(info);
-            let max_width = info_max_width(scene, scale);
+            let max_width = info_max_width(scene.window.0, scale);
             let key = InfoKey { scale, theme: scene.theme, max_width, label };
             let pixmap = self.info.get(key, || draw_info(text, palette, &info_label(info), max_width, scale));
             if let Some(pixmap) = pixmap {
-                let edge = (EDGE * scale).round() as i64;
-                composite(dst, scene.window, pixmap, edge, edge);
+                let (x, y) = info_origin(scene.window.0, pixmap.width(), scale);
+                composite(dst, scene.window, pixmap, x, y);
             }
 
             let layout = toolbar_layout(scene.window, scale);
@@ -1250,7 +1253,8 @@ mod tests {
             let layout = edit_layout(window, scale, &edit());
             let right = window.0 as i32 - (layout.panel.x + layout.panel.w);
             assert!((right as f32 - EDGE * scale).abs() <= 1.0, "{right} at {scale}");
-            assert!((layout.panel.y as f32 - EDGE * scale).abs() <= 1.0);
+            let below_info = EDGE + edit().label_size.1 + 2.0 * INFO_PAD_Y + EDIT_GAP;
+            assert!((layout.panel.y as f32 - below_info * scale).abs() <= 1.0);
             // The main part and the ▾ fill the panel side by side.
             assert_eq!(layout.main.x, layout.panel.x);
             assert_eq!(layout.main.x + layout.main.w, layout.arrow.x);
@@ -1323,14 +1327,19 @@ mod tests {
     }
 
     #[test]
-    fn info_bar_stays_clear_of_the_edit_button() {
-        let mut s = scene(Some(info()), 1.25);
-        let full = info_max_width(&s, 1.25);
-        s.edit = Some(edit());
-        let narrow = info_max_width(&s, 1.25);
-        let button = edit_layout(s.window, 1.25, &edit()).panel;
-        assert!((EDGE * 1.25) as i32 + narrow < button.x, "{narrow} reaches the button at {}", button.x);
-        assert!(narrow < full);
+    fn info_bar_is_top_right_above_the_edit_button() {
+        let text = TextRenderer::new().unwrap();
+        for scale in [1.0, 1.25, 2.0] {
+            let window = (1000, 700);
+            let label = info_label(&info());
+            let bar = draw_info(&text, &LIGHT, &label, info_max_width(window.0, scale), scale).unwrap();
+            let (x, y) = info_origin(window.0, bar.width(), scale);
+            let button = edit_layout(window, scale, &edit()).panel;
+            // Both line up on the right, with the button under the bar.
+            assert_eq!(x + i64::from(bar.width()), i64::from(button.x + button.w), "at {scale}");
+            assert!((y as f32 - EDGE * scale).abs() <= 1.0);
+            assert!(y + i64::from(bar.height()) < i64::from(button.y), "at {scale}");
+        }
     }
 
     #[test]
