@@ -124,6 +124,7 @@ Load system fonts only when the SVG contains text, and do it on the background t
 The SVG fills the whole window. The UI floats on top and stays small.
 
 - Top right: info bar with file name and size details
+- Left and right middle: round Previous and Next buttons, shown when there are other SVGs in the folder to go to
 - Bottom center: toolbar with Open, Previous, Next, Zoom out, zoom %, Zoom in, Fit, Background, Window background, Delete
 - Under the info bar, lined up on its right (Windows only for now): an "Open in <app>" split button, so the file can be opened in an editor such as Inkscape or Illustrator without closing PeregrineView. The main part opens the file in the default editor in one click. The ▾ part opens a menu of the apps Windows lists for the file type, with a ✓ on the default, plus "Other app…", which shows Windows' own chooser for a one-off pick. The app last picked from the menu becomes the default and is remembered between runs; before one is picked the button reads "Open with…" and opens the menu. The button is hidden for pasted SVG code, which has no file. macOS and Linux versions can come later.
 - Clicking the zoom % switches between 100% and fit

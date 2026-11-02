@@ -41,6 +41,9 @@ const MENU_SEPARATOR: f32 = 9.0;
 const MENU_TEXT_X: f32 = 34.0;
 const MENU_MIN_WIDTH: f32 = 180.0;
 const CHECKER_CELL: f32 = 8.0;
+/// The round Previous and Next buttons at the window's left and right middle.
+const SIDE_BUTTON: f32 = 44.0;
+const SIDE_EDGE: f32 = 16.0;
 const BANNER_FONT_SIZE: f32 = 14.0;
 const BANNER_PAD_X: f32 = 16.0;
 const BANNER_PAD_Y: f32 = 9.0;
@@ -190,6 +193,10 @@ pub enum Button {
     Canvas,
     /// Moves the open file to the Recycle Bin or Trash.
     Delete,
+    /// The round Previous button at the window's left middle.
+    SidePrevious,
+    /// The round Next button at the window's right middle.
+    SideNext,
 }
 
 /// A rectangle in window pixels.
@@ -280,6 +287,17 @@ pub fn toolbar_layout(window: (u32, u32), scale: f32) -> ToolbarLayout {
         x += w + BUTTON_GAP;
     }
     layout
+}
+
+/// The round Previous and Next buttons, at the middle of the window's left and right edges.
+pub fn side_layout(window: (u32, u32), scale: f32) -> [(Button, Rect); 2] {
+    let (window_w, window_h) = (window.0 as f32 / scale, window.1 as f32 / scale);
+    let y = ((window_h - SIDE_BUTTON) / 2.0).round();
+    let right = window_w - SIDE_EDGE - SIDE_BUTTON;
+    [
+        (Button::SidePrevious, Rect::scaled(SIDE_EDGE, y, SIDE_BUTTON, SIDE_BUTTON, scale)),
+        (Button::SideNext, Rect::scaled(right, y, SIDE_BUTTON, SIDE_BUTTON, scale)),
+    ]
 }
 
 #[derive(Debug, PartialEq)]
@@ -478,6 +496,12 @@ pub fn hit(scene: &Scene, point: (f32, f32)) -> Option<Hit> {
             return Some(Hit::Inert);
         }
     }
+    if scene.info.is_some() && scene.nav_enabled {
+        let side = side_layout(scene.window, scale).into_iter().find(|(_, rect)| rect.contains(point));
+        if let Some((button, _)) = side {
+            return Some(Hit::Button(button));
+        }
+    }
     if scene.info.is_some() {
         let layout = toolbar_layout(scene.window, scale);
         if !layout.panel.contains(point) {
@@ -498,7 +522,7 @@ pub fn hit(scene: &Scene, point: (f32, f32)) -> Option<Hit> {
 
 fn is_enabled(scene: &Scene, button: Button) -> bool {
     match button {
-        Button::Previous | Button::Next => scene.nav_enabled,
+        Button::Previous | Button::Next | Button::SidePrevious | Button::SideNext => scene.nav_enabled,
         Button::Delete => scene.delete_enabled,
         _ => true,
     }
@@ -600,6 +624,14 @@ struct InfoKey {
 }
 
 #[derive(PartialEq)]
+struct SideKey {
+    scale: f32,
+    theme: Theme,
+    hovered: bool,
+    pressed: bool,
+}
+
+#[derive(PartialEq)]
 struct EmptyKey {
     scale: f32,
     theme: Theme,
@@ -617,6 +649,7 @@ pub struct Ui {
     edit: Cached<EditKey>,
     menu: Cached<MenuKey>,
     empty: Cached<EmptyKey>,
+    sides: [Cached<SideKey>; 2],
 }
 
 impl Ui {
@@ -648,6 +681,18 @@ impl Ui {
             let pixmap = self.toolbar.get(key, || draw_toolbar(text, palette, scene, &layout, scale));
             if let Some(pixmap) = pixmap {
                 composite(dst, scene.window, pixmap, layout.panel.x.into(), layout.panel.y.into());
+            }
+
+            if scene.nav_enabled {
+                for ((button, rect), cache) in side_layout(scene.window, scale).into_iter().zip(&mut self.sides) {
+                    let hovered = scene.hovered == Some(button);
+                    let pressed = hovered && scene.pressed == Some(button);
+                    let key = SideKey { scale, theme: scene.theme, hovered, pressed };
+                    let pixmap = cache.get(key, || draw_side(palette, button, rect, hovered, pressed, scale));
+                    if let Some(pixmap) = pixmap {
+                        composite(dst, scene.window, pixmap, rect.x.into(), rect.y.into());
+                    }
+                }
             }
 
             if let Some(edit) = &scene.edit {
@@ -772,6 +817,27 @@ fn draw_toolbar(
         }
         draw_icon(&mut pixmap, button, scene, rect, color, scale);
     }
+    Some(pixmap)
+}
+
+/// A round panel with a chevron, for the side Previous and Next buttons.
+fn draw_side(palette: &Palette, button: Button, rect: Rect, hovered: bool, pressed: bool, scale: f32) -> Option<Pixmap> {
+    let mut pixmap = Pixmap::new(rect.w.max(1) as u32, rect.h.max(1) as u32)?;
+    let r = pixmap.width().min(pixmap.height()) as f32 / 2.0;
+    let fills = [Some(palette.panel), hovered.then_some(if pressed { palette.pressed } else { palette.hover })];
+    for fill in fills.into_iter().flatten() {
+        if let Some(path) = PathBuilder::from_circle(r, r, r) {
+            pixmap.fill_path(&path, &paint(fill), FillRule::Winding, Transform::identity(), None);
+        }
+    }
+    if let Some(path) = PathBuilder::from_circle(r, r, r - 0.5) {
+        let stroke = Stroke { width: 1.0, ..Stroke::default() };
+        pixmap.stroke_path(&path, &paint(palette.border), &stroke, Transform::identity(), None);
+    }
+    let size = (ICON * scale).round() as i32;
+    let offset = (rect.w - size) / 2;
+    let icon_rect = Rect { x: offset, y: offset, w: size, h: size };
+    stroke_icon(&mut pixmap, &button_icon(button), icon_rect, opaque(palette.icon), 2.2);
     Some(pixmap)
 }
 
@@ -1021,8 +1087,8 @@ fn button_icon(button: Button) -> Option<Path> {
             polyline(pb, &[(3.0, 11.0), (21.0, 11.0)]);
         }),
         Button::EditMenu => icon(|pb| polyline(pb, &[(7.0, 10.0), (12.0, 15.0), (17.0, 10.0)])),
-        Button::Previous => icon(|pb| polyline(pb, &[(14.5, 6.0), (8.5, 12.0), (14.5, 18.0)])),
-        Button::Next => icon(|pb| polyline(pb, &[(9.5, 6.0), (15.5, 12.0), (9.5, 18.0)])),
+        Button::Previous | Button::SidePrevious => icon(|pb| polyline(pb, &[(14.5, 6.0), (8.5, 12.0), (14.5, 18.0)])),
+        Button::Next | Button::SideNext => icon(|pb| polyline(pb, &[(9.5, 6.0), (15.5, 12.0), (9.5, 18.0)])),
         Button::ZoomOut => icon(magnifier),
         Button::ZoomIn => icon(|pb| {
             magnifier(pb);
@@ -1292,6 +1358,22 @@ mod tests {
         let panel = layout.panel;
         assert_eq!(hit(&s, (panel.x as f32 + 1.0, panel.y as f32 + 1.0)), Some(Hit::Inert));
         assert_eq!(hit(&s, (5.0, 5.0)), None);
+    }
+
+    #[test]
+    fn side_buttons_sit_at_the_middle_of_each_edge() {
+        let mut s = scene(Some(info()), 1.5);
+        let [(previous, left), (next, right)] = side_layout(s.window, 1.5);
+        assert_eq!((previous, next), (Button::SidePrevious, Button::SideNext));
+        let middle = s.window.1 as i32 / 2;
+        assert!((left.y + left.h / 2 - middle).abs() <= 1 && left.y == right.y);
+        assert_eq!(left.x, (SIDE_EDGE * 1.5) as i32);
+        assert_eq!(s.window.0 as i32 - (right.x + right.w), (SIDE_EDGE * 1.5) as i32);
+        // Hidden while there is nothing to go to.
+        assert_eq!(hit(&s, center(left)), None);
+        s.nav_enabled = true;
+        assert_eq!(hit(&s, center(left)), Some(Hit::Button(Button::SidePrevious)));
+        assert_eq!(hit(&s, center(right)), Some(Hit::Button(Button::SideNext)));
     }
 
     fn edit() -> EditScene {
