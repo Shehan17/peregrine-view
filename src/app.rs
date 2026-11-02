@@ -18,14 +18,19 @@ use crate::AppEvent;
 use crate::icon::IconImages;
 use crate::loader::{self, Document, Source};
 use crate::platform::Editor;
+use crate::platform::trash::{self, TrashError};
 use crate::render::{self, Backdrop, Frame, Job, Renderer};
 use crate::text::TextRenderer;
-use crate::settings::{self, Settings};
+use crate::settings::{self, Monitor, Settings, WindowPlace};
 use crate::ui::{self, Background, Banner, Button, EditScene, Hit, Info, MenuRow, MenuScene, Scene, Theme, Ui};
 use crate::watch::{self, FileWatcher};
 use crate::view::{self, Limits, View};
 
 const APP_NAME: &str = "PeregrineView";
+/// The window's inner size the first time, in logical pixels.
+const DEFAULT_SIZE: (u32, u32) = (1024, 768);
+/// The confirm button of the question before Delete.
+const DELETE_LABEL: &str = "Delete";
 /// Space around the picture in fit mode, in logical pixels.
 const FIT_MARGIN: f64 = 16.0;
 /// Editors often write a file in several steps; wait this long after the
@@ -57,6 +62,9 @@ pub struct App {
     load_id: u64,
     /// True when the load with `load_id` reloads the open file, which keeps the view.
     load_is_reload: bool,
+    /// True when the load with `load_id` replaces a file that was just
+    /// deleted. If it fails, the deleted picture leaves the screen.
+    load_after_delete: bool,
     /// After a reload, frames of the old version can still be shown as a
     /// preview until the new one is drawn.
     reload_of: Option<u64>,
@@ -122,6 +130,11 @@ pub struct App {
     /// Cursor position at the last drag step, while a drag is in progress.
     drag_from: Option<(f32, f32)>,
     last_click: Option<(Instant, (f32, f32))>,
+    /// Where the window is, or goes back to from maximized or full screen.
+    /// Saved when the app closes, so the window opens there next time.
+    place: Option<WindowPlace>,
+    /// True when the window moved or changed size since `place` was noted.
+    place_changed: bool,
 }
 
 impl App {
@@ -139,6 +152,7 @@ impl App {
             proxy,
             load_id: 0,
             load_is_reload: false,
+            load_after_delete: false,
             reload_of: None,
             reload_at: None,
             watcher: None,
@@ -180,6 +194,8 @@ impl App {
             modifiers: ModifiersState::empty(),
             drag_from: None,
             last_click: None,
+            place: settings.window,
+            place_changed: false,
         };
         if let Some(path) = path {
             app.open(Source::File(path));
@@ -199,6 +215,7 @@ impl App {
         };
         self.load_id += 1;
         self.load_is_reload = reload;
+        self.load_after_delete = false;
         self.nav_resolving = false;
         self.nav_queued = 0;
         self.loading = true;
@@ -266,6 +283,7 @@ impl App {
     }
 
     fn on_loaded(&mut self, path: Option<PathBuf>, result: Result<Document, loader::LoadError>) {
+        let after_delete = std::mem::take(&mut self.load_after_delete);
         self.loading = false;
         self.nav_resolving = false;
         self.nav_queued = 0;
@@ -274,9 +292,15 @@ impl App {
         }
         let doc = match result {
             Ok(doc) => doc,
-            // The previous picture stays on screen.
+            // The previous picture stays on screen, unless it was deleted.
             Err(e) => {
-                self.show_error(e.to_string());
+                if after_delete {
+                    self.close_doc();
+                }
+                // The folder being empty now is no surprise after a delete.
+                if !(after_delete && matches!(e, loader::LoadError::NoOtherFiles)) {
+                    self.show_error(e.to_string());
+                }
                 return;
             }
         };
@@ -286,15 +310,10 @@ impl App {
         // A good file clears any error about the one before.
         self.banner = None;
 
-        if doc.path != self.watched {
-            self.watched = doc.path.clone();
-            self.watcher = None;
-            self.watcher = doc.path.as_ref().and_then(|path| watch::watch(path, self.proxy.clone()));
-        }
-
         let old_id = self.doc_id;
         self.doc = Some(doc);
         self.doc_id += 1;
+        self.watch_doc();
         if self.editable_path().is_none() {
             self.close_menu();
         } else if self.current_editors().is_none() {
@@ -315,6 +334,32 @@ impl App {
             self.frame = None;
             self.refit();
         }
+    }
+
+    /// Watches the open file for changes, unless it is watched already.
+    fn watch_doc(&mut self) {
+        let path = self.doc.as_ref().and_then(|doc| doc.path.clone());
+        if path != self.watched {
+            self.watched = path;
+            self.watcher = None;
+            self.watcher = self.watched.as_ref().and_then(|path| watch::watch(path, self.proxy.clone()));
+        }
+    }
+
+    /// Takes the picture off the screen and shows the empty screen.
+    fn close_doc(&mut self) {
+        self.doc = None;
+        // Renders of the closed picture still on the way are dropped.
+        self.doc_id += 1;
+        self.frame = None;
+        self.reload_of = None;
+        self.reload_at = None;
+        self.watch_doc();
+        self.close_menu();
+        if let Some(gfx) = &self.gfx {
+            gfx.window.set_title(APP_NAME);
+        }
+        self.request_redraw();
     }
 
     fn show_error(&mut self, message: String) {
@@ -339,8 +384,56 @@ impl App {
         self.style_changed();
     }
 
+    fn settings(&self) -> Settings {
+        Settings { background: self.background, editor: self.editor.clone(), window: self.place }
+    }
+
     fn save_settings(&self) {
-        settings::save(Settings { background: self.background, editor: self.editor.clone() });
+        settings::save(self.settings());
+    }
+
+    /// Where to open the window: where it was last time, if that is still on a screen.
+    fn start_place(&self, event_loop: &ActiveEventLoop) -> Option<WindowPlace> {
+        let mut place = self.place?;
+        let monitors: Vec<Monitor> = event_loop
+            .available_monitors()
+            .map(|m| Monitor {
+                position: (m.position().x, m.position().y),
+                size: (m.size().width, m.size().height),
+                scale: m.scale_factor(),
+            })
+            .collect();
+        if !place.is_on_screen(&monitors) {
+            eprintln!("the window's last place is off screen, so the system places it");
+            place.position = None;
+            if let Some(primary) = event_loop.primary_monitor() {
+                let screen = primary.size().to_logical::<u32>(primary.scale_factor());
+                place.size = (place.size.0.min(screen.width), place.size.1.min(screen.height));
+            }
+        }
+        Some(place)
+    }
+
+    /// Notes where the window is, to open there next time. A maximized
+    /// window keeps the place it goes back to; a minimized or full screen
+    /// one changes nothing.
+    fn remember_place(&mut self) {
+        let Some(gfx) = &self.gfx else { return };
+        let window = &gfx.window;
+        if window.fullscreen().is_some() || window.is_minimized() == Some(true) {
+            return;
+        }
+        if window.is_maximized() {
+            let normal = WindowPlace { position: None, size: DEFAULT_SIZE, maximized: false };
+            self.place = Some(WindowPlace { maximized: true, ..self.place.unwrap_or(normal) });
+            return;
+        }
+        let size = window.inner_size().to_logical::<u32>(window.scale_factor());
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        let position = window.outer_position().ok().map(|p| (p.x, p.y));
+        self.place = Some(WindowPlace { position, size: (size.width, size.height), maximized: false });
     }
 
     fn set_theme(&mut self, theme: winit::window::Theme) {
@@ -369,6 +462,7 @@ impl App {
             zoom_percent: self.view.scale / self.actual_size_scale() * 100.0,
             background: self.background,
             nav_enabled: self.nav_path.is_some(),
+            delete_enabled: self.deletable_path().is_some(),
             edit: self.edit_scene(),
             menu: self.menu_scene(),
             hovered: self.hovered,
@@ -390,6 +484,7 @@ impl App {
             Button::ZoomIn => self.zoom_at(KEY_ZOOM, center),
             Button::Fit => self.refit(),
             Button::Background => self.cycle_background(),
+            Button::Delete => self.ask_delete(),
         }
     }
 
@@ -629,20 +724,113 @@ impl App {
     fn open_with(&mut self) {
         #[cfg(windows)]
         {
-            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-            let Some(gfx) = &self.gfx else { return };
             let Some(path) = self.editable_path().cloned() else { return };
-            if self.dialog_open {
+            if self.gfx.is_none() || self.dialog_open {
                 return;
             }
-            let hwnd = match gfx.window.window_handle().map(|handle| handle.as_raw()) {
-                Ok(RawWindowHandle::Win32(handle)) => handle.hwnd.get(),
-                _ => 0,
-            };
-            match crate::platform::windows::spawn_open_with(hwnd, path, self.proxy.clone()) {
+            match crate::platform::windows::spawn_open_with(self.hwnd(), path, self.proxy.clone()) {
                 Ok(()) => self.dialog_open = true,
                 Err(e) => eprintln!("could not start open-with thread: {e}"),
+            }
+        }
+    }
+
+    /// The window's handle on Windows, for system dialogs to show over. 0 elsewhere.
+    fn hwnd(&self) -> isize {
+        #[cfg(windows)]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+            if let Some(gfx) = &self.gfx
+                && let Ok(RawWindowHandle::Win32(handle)) = gfx.window.window_handle().map(|h| h.as_raw())
+            {
+                return handle.hwnd.get();
+            }
+        }
+        0
+    }
+
+    /// The open file, when Delete can move it to the trash. Pasted SVG code
+    /// has no file, and a file just deleted stays on screen until the next one loads.
+    fn deletable_path(&self) -> Option<&PathBuf> {
+        if self.load_after_delete {
+            return None;
+        }
+        self.doc.as_ref()?.path.as_ref()
+    }
+
+    /// Asks whether to move the open file to the trash. The answer comes
+    /// back as `AppEvent::DeleteAnswered`.
+    fn ask_delete(&mut self) {
+        let Some(gfx) = &self.gfx else { return };
+        let Some(path) = self.deletable_path().cloned() else { return };
+        if self.dialog_open {
+            return;
+        }
+        let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        let dialog = rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title("Delete file")
+            .set_description(format!("Move “{name}” to the {}?", trash::TRASH_NAME))
+            // Windows shows OK and Cancel instead.
+            .set_buttons(rfd::MessageButtons::OkCancelCustom(DELETE_LABEL.into(), "Cancel".into()))
+            .set_parent(&*gfx.window);
+        // The dialog blocks its thread until it closes, so it gets its own.
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new().name("delete-dialog".into()).spawn(move || {
+            let confirmed = match dialog.show() {
+                rfd::MessageDialogResult::Ok => true,
+                rfd::MessageDialogResult::Custom(label) => label == DELETE_LABEL,
+                _ => false,
+            };
+            let _ = proxy.send_event(AppEvent::DeleteAnswered { path, confirmed });
+        });
+        match spawned {
+            Ok(_) => self.dialog_open = true,
+            Err(e) => eprintln!("could not start delete dialog thread: {e}"),
+        }
+    }
+
+    /// Moves `path` to the trash, after the user said yes.
+    fn trash(&mut self, path: PathBuf) {
+        // Stop watching first, or the deletion would look like a change to reload.
+        if self.watched.as_ref() == Some(&path) {
+            self.watcher = None;
+            self.watched = None;
+            self.reload_at = None;
+        }
+        // The dialog stays marked open until it is done, so Delete can't start twice.
+        match trash::spawn(path, self.hwnd(), self.proxy.clone()) {
+            Ok(()) => self.dialog_open = true,
+            Err(e) => {
+                eprintln!("could not start trash thread: {e}");
+                self.dialog_open = false;
+                self.watch_doc();
+                self.show_error(format!("This file can't be moved to the {}.", trash::TRASH_NAME));
+            }
+        }
+    }
+
+    fn on_trashed(&mut self, path: PathBuf, result: Result<(), TrashError>) {
+        self.dialog_open = false;
+        match result {
+            Ok(()) => {
+                eprintln!("moved {} to the {}", path.display(), trash::TRASH_NAME);
+                let is_open = self.doc.as_ref().is_some_and(|doc| doc.path.as_ref() == Some(&path));
+                if is_open {
+                    // Show the next SVG in the folder, as Next would.
+                    self.nav_path = Some(path);
+                    self.nav_resolving = false;
+                    self.go(true);
+                    self.load_after_delete = true;
+                    self.request_redraw();
+                }
+            }
+            Err(e) => {
+                self.watch_doc();
+                if e == TrashError::Failed {
+                    self.show_error(format!("This file can't be moved to the {}.", trash::TRASH_NAME));
+                }
             }
         }
     }
@@ -899,6 +1087,13 @@ impl App {
         let primary = if cfg!(target_os = "macos") { m.super_key() } else { m.control_key() };
         let center = self.center();
         if primary {
+            // Cmd+Delete moves files to the Trash in Finder too.
+            if cfg!(target_os = "macos") && event.logical_key == Key::Named(NamedKey::Backspace) {
+                if !event.repeat {
+                    self.ask_delete();
+                }
+                return;
+            }
             if let Key::Character(c) = event.key_without_modifiers() {
                 let once = !event.repeat;
                 match c.to_lowercase().as_str() {
@@ -943,6 +1138,7 @@ impl App {
             Key::Named(NamedKey::PageUp | NamedKey::Backspace) => self.go(false),
             Key::Named(NamedKey::F11) => self.toggle_fullscreen(),
             Key::Named(NamedKey::Escape) => self.leave_fullscreen(),
+            Key::Named(NamedKey::Delete) if !event.repeat => self.ask_delete(),
             _ => {}
         }
     }
@@ -1104,9 +1300,18 @@ impl ApplicationHandler<AppEvent> for App {
         if self.gfx.is_some() {
             return;
         }
-        let attributes = Window::default_attributes()
+        let mut attributes = Window::default_attributes()
             .with_title(APP_NAME)
-            .with_inner_size(LogicalSize::new(1024.0, 768.0));
+            .with_inner_size(LogicalSize::new(DEFAULT_SIZE.0, DEFAULT_SIZE.1));
+        // Open where the window was when the app last closed.
+        if let Some(place) = self.start_place(event_loop) {
+            attributes = attributes
+                .with_inner_size(LogicalSize::new(place.size.0, place.size.1))
+                .with_maximized(place.maximized);
+            if let Some((x, y)) = place.position {
+                attributes = attributes.with_position(PhysicalPosition::new(x, y));
+            }
+        }
         // The Wayland app ID and X11 WM_CLASS. Desktops match it to
         // peregrineview.desktop for the taskbar icon and window grouping.
         #[cfg(target_os = "linux")]
@@ -1142,6 +1347,7 @@ impl ApplicationHandler<AppEvent> for App {
         self.viewport = window.inner_size();
         self.scale_factor = window.scale_factor();
         self.gfx = Some(Gfx { window, surface });
+        self.place_changed = true;
         self.apply_icons();
         eprintln!("window created {:?} after start", self.started.elapsed());
         self.refit();
@@ -1166,6 +1372,13 @@ impl ApplicationHandler<AppEvent> for App {
                     self.open(Source::File(path));
                 }
             }
+            AppEvent::DeleteAnswered { path, confirmed } => {
+                self.dialog_open = false;
+                if confirmed {
+                    self.trash(path);
+                }
+            }
+            AppEvent::Trashed { path, result } => self.on_trashed(path, result),
             AppEvent::Rendered(frame) => self.on_rendered(frame),
             AppEvent::Icons(icons) => {
                 self.icons = Some(icons);
@@ -1210,6 +1423,11 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Noted only now: while a window maximizes, Windows reports the move
+        // before winit knows it is maximized.
+        if std::mem::take(&mut self.place_changed) {
+            self.remember_place();
+        }
         let now = Instant::now();
         if self.settle_at.is_some_and(|at| now >= at) {
             self.settle_at = None;
@@ -1253,7 +1471,11 @@ impl ApplicationHandler<AppEvent> for App {
                 self.hovered = None;
                 self.request_redraw();
             }
-            WindowEvent::Resized(size) => self.on_resized(size),
+            WindowEvent::Resized(size) => {
+                self.on_resized(size);
+                self.place_changed = true;
+            }
+            WindowEvent::Moved(_) => self.place_changed = true,
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.on_scale_factor_changed(scale_factor);
             }
@@ -1283,5 +1505,10 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
         }
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Saved now and not on a thread, which would stop when the app does.
+        settings::save_now(&self.settings());
     }
 }

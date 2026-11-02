@@ -67,6 +67,14 @@ On Windows and Linux, a double-clicked file arrives as a command line argument. 
 
 Every newly opened file is shown fit to the window, centered, with a small margin. The window title becomes `<file name> – PeregrineView`. If the window is resized while the view is still in fit mode, it refits. After the user zooms or moves, resizing keeps the current view.
 
+### Window place
+
+The window opens where it was when the app last closed, at the same size, and maximized if it was maximized. A maximized or full screen window remembers the place it goes back to. If that place is no longer on any screen, for example because a monitor was unplugged, the system places the window and only the size is kept. Wayland doesn't let apps place windows, so there only the size is kept.
+
+### Deleting
+
+The Delete button and the Delete key move the open file to the Recycle Bin (Windows) or the Trash (macOS, Linux), so it can still be restored. The app asks first: "Move “<file name>” to the Recycle Bin?" After the file is moved, the next SVG in the folder opens, as with Next; if there is none, the empty screen shows. If the file can't be recycled, as on some network drives, Windows warns that it will be deleted for good and asks again. Pasted SVG code has no file, so Delete is off for it.
+
 ### Navigation
 
 - Mouse wheel: zoom in or out at the cursor point (the point under the cursor stays still)
@@ -107,13 +115,15 @@ Load system fonts only when the SVG contains text, and do it on the background t
 - [ ] Auto reload when the file changes on disk, keeping the current zoom and position
 - [ ] `.svgz` support
 - [ ] Light and dark UI that follows the system theme
+- [ ] Delete: move the open file to the Recycle Bin or Trash, after asking
+- [ ] The window opens where it was last closed, at the same size
 
 ### UI layout
 
 The SVG fills the whole window. The UI floats on top and stays small.
 
 - Top left: info bar with file name and size details
-- Bottom center: toolbar with Open, Previous, Next, Zoom out, zoom %, Zoom in, Fit, Background
+- Bottom center: toolbar with Open, Previous, Next, Zoom out, zoom %, Zoom in, Fit, Background, Delete
 - Top right (Windows only for now): an "Open in <app>" split button, so the file can be opened in an editor such as Inkscape or Illustrator without closing PeregrineView. The main part opens the file in the default editor in one click. The ▾ part opens a menu of the apps Windows lists for the file type, with a ✓ on the default, plus "Other app…", which shows Windows' own chooser for a one-off pick. The app last picked from the menu becomes the default and is remembered between runs; before one is picked the button reads "Open with…" and opens the menu. The button is hidden for pasted SVG code, which has no file. macOS and Linux versions can come later.
 - Clicking the zoom % switches between 100% and fit
 - Error messages appear as a short banner at the top for about 6 seconds
@@ -141,6 +151,7 @@ On macOS, Cmd replaces Ctrl in every shortcut.
 | Shift+E | Show the editor menu (Windows) |
 | F11 | Full screen on or off |
 | Esc | Leave full screen |
+| Delete | Move the file to the Recycle Bin or Trash (on macOS also Cmd+Delete, as in Finder) |
 | Ctrl+W or Ctrl+Q | Close the app |
 
 Left and Right arrows move the view, so next/previous file uses Page Down and Page Up. This avoids a conflict when the user is zoomed in.
@@ -164,9 +175,10 @@ While the user moves, the main thread shows a fast preview of the last bitmap. A
 | `text.rs` | UI text with one small embedded font (`ab_glyph`) |
 | `nav.rs` | List SVGs in the folder for next and previous |
 | `watch.rs` | File watcher with `notify` |
-| `settings.rs` | Save the background choice and the default editor in the user config folder |
+| `settings.rs` | Save the background choice, the default editor and the window's place in the user config folder |
 | `platform/macos.rs` | Finder open-file handler |
 | `platform/windows.rs` | List the apps for a file type, open the file in one, and Windows' "Open with" chooser |
+| `platform/trash.rs` | Move a file to the Recycle Bin or Trash |
 
 ## Errors and compatibility
 
@@ -191,6 +203,7 @@ Write messages in plain words that say what went wrong:
 - "This SVG has broken code near line 12."
 - "The file was deleted or moved."
 - "This SVG is too large to draw at this zoom."
+- "This file can't be moved to the Recycle Bin."
 
 Never use `unwrap()` on anything that depends on user files. Log details to stderr for debugging.
 

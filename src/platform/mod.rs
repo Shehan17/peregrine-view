@@ -4,6 +4,7 @@
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+pub mod trash;
 #[cfg(windows)]
 pub mod windows;
 

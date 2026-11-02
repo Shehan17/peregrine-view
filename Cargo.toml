@@ -17,11 +17,11 @@ ab_glyph = { version = "0.2.32", default-features = false, features = ["std"] }
 arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
 notify = "8.2"
 
-# Receives files opened from Finder. These are the versions rfd, arboard and
-# softbuffer already use, so they add no new code to build.
+# Receives files opened from Finder and moves files to the Trash. These are the
+# versions rfd, arboard and softbuffer already use, so they add no new code to build.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.3"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSURL"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSError", "NSFileManager", "NSString", "NSURL"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder"] }
 
 # Puts the app icon and version info into the Windows exe (see build.rs).

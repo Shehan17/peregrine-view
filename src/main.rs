@@ -30,6 +30,10 @@ pub enum AppEvent {
     Rendered(render::Frame),
     /// The Open dialog closed, with the chosen file if there is one.
     DialogClosed(Option<PathBuf>),
+    /// The user answered whether to move `path` to the trash.
+    DeleteAnswered { path: PathBuf, confirmed: bool },
+    /// Moving `path` to the trash finished.
+    Trashed { path: PathBuf, result: Result<(), platform::trash::TrashError> },
     /// A file was opened from Finder.
     #[cfg(target_os = "macos")]
     OpenFile(PathBuf),

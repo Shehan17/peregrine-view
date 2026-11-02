@@ -161,6 +161,8 @@ pub enum Button {
     ZoomIn,
     Fit,
     Background,
+    /// Moves the open file to the Recycle Bin or Trash.
+    Delete,
 }
 
 /// A rectangle in window pixels.
@@ -209,6 +211,8 @@ const TOOLBAR_ITEMS: &[Item] = &[
     Item::Button(Button::Fit),
     Item::Separator,
     Item::Button(Button::Background),
+    Item::Separator,
+    Item::Button(Button::Delete),
 ];
 
 #[derive(Debug, PartialEq)]
@@ -289,6 +293,8 @@ pub struct Scene {
     pub zoom_percent: f32,
     pub background: Background,
     pub nav_enabled: bool,
+    /// True when the picture is a file, which Delete can move to the trash.
+    pub delete_enabled: bool,
     /// The "Open in" button, when the open picture is a file another app can open.
     pub edit: Option<EditScene>,
     /// The app menu, while it is open. Needs `edit`.
@@ -461,6 +467,7 @@ pub fn hit(scene: &Scene, point: (f32, f32)) -> Option<Hit> {
 fn is_enabled(scene: &Scene, button: Button) -> bool {
     match button {
         Button::Previous | Button::Next => scene.nav_enabled,
+        Button::Delete => scene.delete_enabled,
         _ => true,
     }
 }
@@ -525,6 +532,7 @@ struct ToolbarKey {
     zoom: String,
     background: Background,
     nav_enabled: bool,
+    delete_enabled: bool,
     hovered: Option<Button>,
     pressed: Option<Button>,
 }
@@ -599,6 +607,7 @@ impl Ui {
                 zoom: format_zoom(scene.zoom_percent),
                 background: scene.background,
                 nav_enabled: scene.nav_enabled,
+                delete_enabled: scene.delete_enabled,
                 hovered: scene.hovered,
                 pressed: scene.pressed,
             };
@@ -995,6 +1004,14 @@ fn button_icon(button: Button) -> Option<Path> {
             polyline(pb, &[(4.0, 4.0), (20.0, 4.0), (20.0, 20.0), (4.0, 20.0)]);
             pb.close();
         }),
+        // A trash can: lid, handle, body and two ribs.
+        Button::Delete => icon(|pb| {
+            polyline(pb, &[(4.0, 6.5), (20.0, 6.5)]);
+            polyline(pb, &[(9.5, 6.5), (9.5, 4.0), (14.5, 4.0), (14.5, 6.5)]);
+            polyline(pb, &[(6.0, 6.5), (7.0, 20.0), (17.0, 20.0), (18.0, 6.5)]);
+            polyline(pb, &[(10.0, 10.5), (10.0, 16.5)]);
+            polyline(pb, &[(14.0, 10.5), (14.0, 16.5)]);
+        }),
         Button::Zoom | Button::Edit => None,
     }
 }
@@ -1149,6 +1166,7 @@ mod tests {
             zoom_percent: 100.0,
             background: Background::Checkerboard,
             nav_enabled: false,
+            delete_enabled: false,
             edit: None,
             menu: None,
             hovered: None,
@@ -1175,8 +1193,8 @@ mod tests {
             assert!((left - right).abs() <= 2, "{left} vs {right} at {scale}");
             let bottom = window.1 as i32 - (layout.panel.y + layout.panel.h);
             assert!((bottom as f32 - TOOLBAR_BOTTOM * scale).abs() <= 1.0);
-            assert_eq!(layout.buttons.len(), 8);
-            assert_eq!(layout.separators.len(), 3);
+            assert_eq!(layout.buttons.len(), 9);
+            assert_eq!(layout.separators.len(), 4);
         }
     }
 
@@ -1185,7 +1203,7 @@ mod tests {
         let layout = toolbar_layout((1000, 700), 1.5);
         let order: Vec<Button> = layout.buttons.iter().map(|(b, _)| *b).collect();
         use Button::*;
-        assert_eq!(order, vec![Open, Previous, Next, ZoomOut, Zoom, ZoomIn, Fit, Background]);
+        assert_eq!(order, vec![Open, Previous, Next, ZoomOut, Zoom, ZoomIn, Fit, Background, Delete]);
         for pair in layout.buttons.windows(2) {
             assert!(pair[0].1.x + pair[0].1.w <= pair[1].1.x);
         }
@@ -1199,7 +1217,7 @@ mod tests {
         let s = scene(Some(info()), 1.0);
         let layout = toolbar_layout(s.window, 1.0);
         for &(button, rect) in &layout.buttons {
-            let expected = if matches!(button, Button::Previous | Button::Next) {
+            let expected = if matches!(button, Button::Previous | Button::Next | Button::Delete) {
                 Hit::Inert
             } else {
                 Hit::Button(button)
