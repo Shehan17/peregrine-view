@@ -72,6 +72,25 @@ impl Background {
     }
 }
 
+/// What is drawn around the picture, filling the rest of the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Canvas {
+    /// The light or dark theme's own color.
+    Theme,
+    White,
+    Dark,
+}
+
+impl Canvas {
+    pub fn next(self) -> Canvas {
+        match self {
+            Canvas::Theme => Canvas::White,
+            Canvas::White => Canvas::Dark,
+            Canvas::Dark => Canvas::Theme,
+        }
+    }
+}
+
 struct Palette {
     canvas: u32,
     checker: (u32, u32),
@@ -133,7 +152,7 @@ impl Theme {
 }
 
 /// The colors the render thread paints behind and around the picture.
-pub fn backdrop(theme: Theme, background: Background, scale: f32) -> Backdrop {
+pub fn backdrop(theme: Theme, background: Background, canvas: Canvas, scale: f32) -> Backdrop {
     let palette = theme.palette();
     let picture = match background {
         Background::Checkerboard => Fill::Checker {
@@ -144,7 +163,13 @@ pub fn backdrop(theme: Theme, background: Background, scale: f32) -> Backdrop {
         Background::White => Fill::Solid(0xFFFFFF),
         Background::Dark => Fill::Solid(0x2A2A2A),
     };
-    Backdrop { canvas: palette.canvas, picture }
+    let canvas = match canvas {
+        Canvas::Theme => palette.canvas,
+        Canvas::White => 0xFFFFFF,
+        // Darker than the dark picture background, so the picture's edge still shows.
+        Canvas::Dark => 0x121212,
+    };
+    Backdrop { canvas, picture }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +186,8 @@ pub enum Button {
     ZoomIn,
     Fit,
     Background,
+    /// Changes the color around the picture.
+    Canvas,
     /// Moves the open file to the Recycle Bin or Trash.
     Delete,
 }
@@ -211,6 +238,7 @@ const TOOLBAR_ITEMS: &[Item] = &[
     Item::Button(Button::Fit),
     Item::Separator,
     Item::Button(Button::Background),
+    Item::Button(Button::Canvas),
     Item::Separator,
     Item::Button(Button::Delete),
 ];
@@ -292,6 +320,7 @@ pub struct Scene {
     pub show_empty: bool,
     pub zoom_percent: f32,
     pub background: Background,
+    pub canvas: Canvas,
     pub nav_enabled: bool,
     /// True when the picture is a file, which Delete can move to the trash.
     pub delete_enabled: bool,
@@ -534,6 +563,7 @@ struct ToolbarKey {
     theme: Theme,
     zoom: String,
     background: Background,
+    canvas: Canvas,
     nav_enabled: bool,
     delete_enabled: bool,
     hovered: Option<Button>,
@@ -609,6 +639,7 @@ impl Ui {
                 theme: scene.theme,
                 zoom: format_zoom(scene.zoom_percent),
                 background: scene.background,
+                canvas: scene.canvas,
                 nav_enabled: scene.nav_enabled,
                 delete_enabled: scene.delete_enabled,
                 hovered: scene.hovered,
@@ -739,7 +770,7 @@ fn draw_toolbar(
         if !enabled {
             color[3] = 0x59;
         }
-        draw_icon(&mut pixmap, button, scene.background, rect, color, scale);
+        draw_icon(&mut pixmap, button, scene, rect, color, scale);
     }
     Some(pixmap)
 }
@@ -1007,6 +1038,13 @@ fn button_icon(button: Button) -> Option<Path> {
             polyline(pb, &[(4.0, 4.0), (20.0, 4.0), (20.0, 20.0), (4.0, 20.0)]);
             pb.close();
         }),
+        // A frame with a small page in the middle.
+        Button::Canvas => icon(|pb| {
+            polyline(pb, &[(4.0, 4.0), (20.0, 4.0), (20.0, 20.0), (4.0, 20.0)]);
+            pb.close();
+            polyline(pb, &[(9.0, 9.0), (15.0, 9.0), (15.0, 15.0), (9.0, 15.0)]);
+            pb.close();
+        }),
         // A trash can: lid, handle, body and two ribs.
         Button::Delete => icon(|pb| {
             polyline(pb, &[(4.0, 6.5), (20.0, 6.5)]);
@@ -1043,7 +1081,7 @@ fn stroke_icon(pixmap: &mut Pixmap, path: &Option<Path>, rect: Rect, color: [u8;
     pixmap.stroke_path(path, &paint(color), &stroke, icon_transform(rect, size), None);
 }
 
-fn draw_icon(pixmap: &mut Pixmap, button: Button, background: Background, rect: Rect, color: [u8; 4], scale: f32) {
+fn draw_icon(pixmap: &mut Pixmap, button: Button, scene: &Scene, rect: Rect, color: [u8; 4], scale: f32) {
     let size = ICON * scale;
     let icon_rect = Rect {
         x: rect.x + ((rect.w as f32 - size) / 2.0).round() as i32,
@@ -1056,7 +1094,7 @@ fn draw_icon(pixmap: &mut Pixmap, button: Button, background: Background, rect: 
     // The Background button shows the current choice inside its square.
     if button == Button::Background {
         let transform = icon_transform(icon_rect, icon_rect.w as f32);
-        let squares: &[(f32, f32, f32, f32)] = match background {
+        let squares: &[(f32, f32, f32, f32)] = match scene.background {
             Background::Checkerboard => &[(4.0, 4.0, 8.0, 8.0), (12.0, 12.0, 8.0, 8.0)],
             Background::Dark => &[(4.0, 4.0, 16.0, 16.0)],
             Background::White => &[],
@@ -1065,6 +1103,28 @@ fn draw_icon(pixmap: &mut Pixmap, button: Button, background: Background, rect: 
             if let Some(rect) = resvg::tiny_skia::Rect::from_xywh(x, y, w, h) {
                 pixmap.fill_rect(rect, &paint(color), transform, None);
             }
+        }
+    }
+
+    // The Canvas button fills the frame around its page: half for the
+    // theme's color, all of it for dark, none for white.
+    if button == Button::Canvas {
+        let transform = icon_transform(icon_rect, icon_rect.w as f32);
+        let ring = match scene.canvas {
+            Canvas::Theme => icon(|pb| {
+                polyline(pb, &[(4.0, 4.0), (12.0, 4.0), (12.0, 9.0), (9.0, 9.0), (9.0, 15.0), (12.0, 15.0), (12.0, 20.0), (4.0, 20.0)]);
+                pb.close();
+            }),
+            Canvas::Dark => icon(|pb| {
+                polyline(pb, &[(4.0, 4.0), (20.0, 4.0), (20.0, 20.0), (4.0, 20.0)]);
+                pb.close();
+                polyline(pb, &[(9.0, 9.0), (15.0, 9.0), (15.0, 15.0), (9.0, 15.0)]);
+                pb.close();
+            }),
+            Canvas::White => None,
+        };
+        if let Some(ring) = ring {
+            pixmap.fill_path(&ring, &paint(color), FillRule::EvenOdd, transform, None);
         }
     }
 }
@@ -1168,6 +1228,7 @@ mod tests {
             show_empty: true,
             zoom_percent: 100.0,
             background: Background::Checkerboard,
+            canvas: Canvas::Theme,
             nav_enabled: false,
             delete_enabled: false,
             edit: None,
@@ -1196,7 +1257,7 @@ mod tests {
             assert!((left - right).abs() <= 2, "{left} vs {right} at {scale}");
             let bottom = window.1 as i32 - (layout.panel.y + layout.panel.h);
             assert!((bottom as f32 - TOOLBAR_BOTTOM * scale).abs() <= 1.0);
-            assert_eq!(layout.buttons.len(), 9);
+            assert_eq!(layout.buttons.len(), 10);
             assert_eq!(layout.separators.len(), 4);
         }
     }
@@ -1206,7 +1267,7 @@ mod tests {
         let layout = toolbar_layout((1000, 700), 1.5);
         let order: Vec<Button> = layout.buttons.iter().map(|(b, _)| *b).collect();
         use Button::*;
-        assert_eq!(order, vec![Open, Previous, Next, ZoomOut, Zoom, ZoomIn, Fit, Background, Delete]);
+        assert_eq!(order, vec![Open, Previous, Next, ZoomOut, Zoom, ZoomIn, Fit, Background, Canvas, Delete]);
         for pair in layout.buttons.windows(2) {
             assert!(pair[0].1.x + pair[0].1.w <= pair[1].1.x);
         }
@@ -1394,6 +1455,9 @@ mod tests {
         let b = Background::Checkerboard;
         assert_eq!(b.next().next().next(), b);
         assert_ne!(b.next(), b);
+        let c = Canvas::Theme;
+        assert_eq!(c.next().next().next(), c);
+        assert_ne!(c.next(), c);
     }
 
     #[test]

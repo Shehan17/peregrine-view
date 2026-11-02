@@ -22,7 +22,7 @@ use crate::platform::trash::{self, TrashError};
 use crate::render::{self, Backdrop, Frame, Job, Renderer};
 use crate::text::TextRenderer;
 use crate::settings::{self, Monitor, Settings, WindowPlace};
-use crate::ui::{self, Background, Banner, Button, EditScene, Hit, Info, MenuRow, MenuScene, Scene, Theme, Ui};
+use crate::ui::{self, Background, Banner, Button, Canvas, EditScene, Hit, Info, MenuRow, MenuScene, Scene, Theme, Ui};
 use crate::watch::{self, FileWatcher};
 use crate::view::{self, Limits, View};
 
@@ -86,6 +86,7 @@ pub struct App {
     banner: Option<Banner>,
     theme: Theme,
     background: Background,
+    canvas: Canvas,
     /// The toolbar or empty-screen button under the cursor.
     hovered: Option<Button>,
     /// The button the left mouse button went down on, until it comes up.
@@ -167,6 +168,7 @@ impl App {
             banner: None,
             theme: Theme::Light,
             background: settings.background,
+            canvas: settings.canvas,
             hovered: None,
             pressed: None,
             file_hovering: false,
@@ -369,7 +371,9 @@ impl App {
     }
 
     fn backdrop(&self) -> Backdrop {
-        ui::backdrop(self.theme, self.background, self.scale_factor as f32)
+        // The empty screen keeps the theme's color, so its text stays readable.
+        let canvas = if self.doc.is_some() { self.canvas } else { Canvas::Theme };
+        ui::backdrop(self.theme, self.background, canvas, self.scale_factor as f32)
     }
 
     /// The colors changed: redraw the picture right away.
@@ -384,8 +388,14 @@ impl App {
         self.style_changed();
     }
 
+    fn cycle_canvas(&mut self) {
+        self.canvas = self.canvas.next();
+        self.save_settings();
+        self.style_changed();
+    }
+
     fn settings(&self) -> Settings {
-        Settings { background: self.background, editor: self.editor.clone(), window: self.place }
+        Settings { background: self.background, canvas: self.canvas, editor: self.editor.clone(), window: self.place }
     }
 
     fn save_settings(&self) {
@@ -461,6 +471,7 @@ impl App {
             show_empty: !self.loading,
             zoom_percent: self.view.scale / self.actual_size_scale() * 100.0,
             background: self.background,
+            canvas: self.canvas,
             nav_enabled: self.nav_path.is_some(),
             delete_enabled: self.deletable_path().is_some(),
             edit: self.edit_scene(),
@@ -484,6 +495,7 @@ impl App {
             Button::ZoomIn => self.zoom_at(KEY_ZOOM, center),
             Button::Fit => self.refit(),
             Button::Background => self.cycle_background(),
+            Button::Canvas => self.cycle_canvas(),
             Button::Delete => self.ask_delete(),
         }
     }
@@ -1123,6 +1135,7 @@ impl App {
                 "-" => self.zoom_at(1.0 / KEY_ZOOM, center),
                 "0" | "f" | "F" => self.refit(),
                 "1" => self.toggle_actual_size(),
+                "b" | "B" if m.shift_key() => self.cycle_canvas(),
                 "b" | "B" => self.cycle_background(),
                 "r" | "R" => self.reload(),
                 "e" | "E" if !event.repeat && m.shift_key() => self.toggle_menu(),

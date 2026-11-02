@@ -111,6 +111,7 @@ Load system fonts only when the SVG contains text, and do it on the background t
 - [ ] Sharp redraw after the user stops moving
 - [ ] Next and previous SVG in the same folder (sorted by name, wraps around)
 - [ ] Background switch: checkerboard, white, dark (remembered between runs)
+- [ ] Window background switch for the area around the picture: theme color, white, dark (remembered between runs)
 - [ ] Info bar: file name, width × height, file size
 - [ ] Auto reload when the file changes on disk, keeping the current zoom and position
 - [ ] `.svgz` support
@@ -123,7 +124,7 @@ Load system fonts only when the SVG contains text, and do it on the background t
 The SVG fills the whole window. The UI floats on top and stays small.
 
 - Top right: info bar with file name and size details
-- Bottom center: toolbar with Open, Previous, Next, Zoom out, zoom %, Zoom in, Fit, Background, Delete
+- Bottom center: toolbar with Open, Previous, Next, Zoom out, zoom %, Zoom in, Fit, Background, Window background, Delete
 - Under the info bar, lined up on its right (Windows only for now): an "Open in <app>" split button, so the file can be opened in an editor such as Inkscape or Illustrator without closing PeregrineView. The main part opens the file in the default editor in one click. The ▾ part opens a menu of the apps Windows lists for the file type, with a ✓ on the default, plus "Other app…", which shows Windows' own chooser for a one-off pick. The app last picked from the menu becomes the default and is remembered between runs; before one is picked the button reads "Open with…" and opens the menu. The button is hidden for pasted SVG code, which has no file. macOS and Linux versions can come later.
 - Clicking the zoom % switches between 100% and fit
 - Error messages appear as a short banner at the top for about 6 seconds
@@ -146,6 +147,7 @@ On macOS, Cmd replaces Ctrl in every shortcut.
 | Page Down / Space | Next SVG in folder |
 | Page Up / Backspace | Previous SVG in folder |
 | `B` | Change background |
+| Shift+`B` | Change window background (around the picture) |
 | `R` | Reload file |
 | `E` | Open the file in the default editor (Windows) |
 | Shift+E | Show the editor menu (Windows) |
@@ -175,7 +177,7 @@ While the user moves, the main thread shows a fast preview of the last bitmap. A
 | `text.rs` | UI text with one small embedded font (`ab_glyph`) |
 | `nav.rs` | List SVGs in the folder for next and previous |
 | `watch.rs` | File watcher with `notify` |
-| `settings.rs` | Save the background choice, the default editor and the window's place in the user config folder |
+| `settings.rs` | Save the background choices, the default editor and the window's place in the user config folder |
 | `platform/macos.rs` | Finder open-file handler |
 | `platform/windows.rs` | List the apps for a file type, open the file in one, and Windows' "Open with" chooser |
 | `platform/trash.rs` | Move a file to the Recycle Bin or Trash |

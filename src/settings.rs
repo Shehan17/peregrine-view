@@ -1,14 +1,16 @@
-//! Saves the background choice, the default editor and the window's place
+//! Saves the background choices, the default editor and the window's place
 //! in the user's config folder.
 
 use std::path::PathBuf;
 
 use crate::platform::Editor;
-use crate::ui::Background;
+use crate::ui::{Background, Canvas};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub background: Background,
+    /// The color around the picture.
+    pub canvas: Canvas,
     /// The app the "Open in" button uses: the last one picked from its menu.
     pub editor: Option<Editor>,
     /// Where the window was when the app last closed.
@@ -17,7 +19,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { background: Background::Checkerboard, editor: None, window: None }
+        Settings { background: Background::Checkerboard, canvas: Canvas::Theme, editor: None, window: None }
     }
 }
 
@@ -132,6 +134,12 @@ fn parse(text: &str) -> Settings {
                 "dark" => settings.background = Background::Dark,
                 _ => {}
             },
+            "canvas" => match value {
+                "theme" => settings.canvas = Canvas::Theme,
+                "white" => settings.canvas = Canvas::White,
+                "dark" => settings.canvas = Canvas::Dark,
+                _ => {}
+            },
             "editor" if !value.is_empty() => editor_id = Some(value.to_owned()),
             "editor_name" if !value.is_empty() => editor_name = Some(value.to_owned()),
             "window_position" => position = parse_pair(value),
@@ -155,7 +163,12 @@ fn serialize(settings: &Settings) -> String {
         Background::White => "white",
         Background::Dark => "dark",
     };
-    let mut text = format!("background={background}\n");
+    let canvas = match settings.canvas {
+        Canvas::Theme => "theme",
+        Canvas::White => "white",
+        Canvas::Dark => "dark",
+    };
+    let mut text = format!("background={background}\ncanvas={canvas}\n");
     if let Some(editor) = &settings.editor {
         // A line break would split a value; real program paths and names have none.
         let line = |s: &str| s.replace(['\r', '\n'], " ");
@@ -187,12 +200,16 @@ mod tests {
             let settings = Settings { background, ..Settings::default() };
             assert_eq!(parse(&serialize(&settings)), settings);
         }
+        for canvas in [Canvas::Theme, Canvas::White, Canvas::Dark] {
+            let settings = Settings { canvas, ..Settings::default() };
+            assert_eq!(parse(&serialize(&settings)), settings);
+        }
         let editor = Editor {
             id: r"C:\Program Files\Inkscape\bin\inkscape.exe".into(),
             name: "Inkscape vector graphics editor".into(),
         };
         let window = WindowPlace { position: Some((-1500, 40)), size: (1024, 768), maximized: true };
-        let settings = Settings { background: Background::Dark, editor: Some(editor), window: Some(window) };
+        let settings = Settings { background: Background::Dark, canvas: Canvas::Dark, editor: Some(editor), window: Some(window) };
         assert_eq!(parse(&serialize(&settings)), settings);
         // Wayland gives no position.
         let window = WindowPlace { position: None, size: (800, 600), maximized: false };
