@@ -3,7 +3,7 @@ name = "peregrineview"
 version = "0.2.0"
 edition = "2024"
 description = "A fast, lightweight SVG viewer"
-license = "MIT OR Apache-2.0"
+license = "Unlicense"
 
 [dependencies]
 # svgz is off: the loader unzips itself so it can detect the text encoding after.

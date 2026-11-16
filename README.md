@@ -82,4 +82,6 @@ PeregrineView is a viewer only. It doesn't edit SVGs, run scripts or play animat
 
 ## License
 
-MIT or Apache-2.0, at your option.
+PeregrineView is free and unencumbered software released into the public domain under the [Unlicense](LICENSE). Anyone can copy, change, sell or use it for any purpose, commercial or not, with no permission needed and no credit required.
+
+The UI font, Noto Sans (`assets/fonts`), keeps its own [SIL Open Font License](assets/fonts/OFL.txt).
