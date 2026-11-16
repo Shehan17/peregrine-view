@@ -69,6 +69,29 @@ impl View {
         }
     }
 
+    /// Moves the view just enough that at least `min_visible` pixels of the
+    /// `content` (SVG units) stay in `viewport` along each side, or all of it
+    /// when it is smaller, so the picture can't be lost off screen. An empty
+    /// viewport, as when minimized, changes nothing.
+    pub fn keep_visible(self, content: (f32, f32), viewport: (f32, f32), min_visible: f32) -> View {
+        if !(viewport.0 > 0.0 && viewport.1 > 0.0) {
+            return self;
+        }
+        let clamp = |t: f32, content: f32, window: f32| {
+            let extent = content * self.scale;
+            let keep = min_visible.min(extent).min(window).max(0.0);
+            if !(extent.is_finite() && t.is_finite()) {
+                return t;
+            }
+            t.clamp(keep - extent, window - keep)
+        };
+        View {
+            tx: clamp(self.tx, content.0, viewport.0),
+            ty: clamp(self.ty, content.1, viewport.1),
+            ..self
+        }
+    }
+
     /// Moves the picture by `(dx, dy)` screen pixels.
     pub fn pan(self, dx: f32, dy: f32) -> View {
         if !(dx.is_finite() && dy.is_finite()) {
@@ -213,6 +236,25 @@ mod tests {
         let v = View { scale: 2.0, tx: 1.0, ty: 2.0 }.pan(10.0, -5.0);
         assert_eq!(v, View { scale: 2.0, tx: 11.0, ty: -3.0 });
         assert_eq!(v.pan(f32::NAN, 0.0), v);
+    }
+
+    #[test]
+    fn picture_stays_partly_visible() {
+        // A 100x100 picture at 2x is 200 px wide, in a 400x300 window.
+        let v = View { scale: 2.0, tx: 50.0, ty: 50.0 };
+        assert_eq!(v.keep_visible((100.0, 100.0), (400.0, 300.0), 64.0), v);
+        // Pushed far right and down: 64 px stay in at the far edges.
+        let far = View { tx: 1000.0, ty: 1000.0, ..v }.keep_visible((100.0, 100.0), (400.0, 300.0), 64.0);
+        assert_eq!((far.tx, far.ty), (336.0, 236.0));
+        // Pushed far left and up.
+        let far = View { tx: -1000.0, ty: -1000.0, ..v }.keep_visible((100.0, 100.0), (400.0, 300.0), 64.0);
+        assert_eq!((far.tx, far.ty), (-136.0, -136.0));
+        // A picture smaller than the margin stays wholly in the window.
+        let tiny = View { scale: 1.0, tx: -50.0, ty: 500.0 }.keep_visible((10.0, 10.0), (400.0, 300.0), 64.0);
+        assert_eq!((tiny.tx, tiny.ty), (0.0, 290.0));
+        // Minimized: nothing to keep in view, so nothing moves.
+        let gone = View { tx: 5000.0, ..v };
+        assert_eq!(gone.keep_visible((100.0, 100.0), (0.0, 0.0), 64.0), gone);
     }
 
     #[test]

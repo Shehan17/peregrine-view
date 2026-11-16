@@ -44,6 +44,8 @@ const WHEEL_ZOOM: f32 = 1.2;
 const KEY_ZOOM: f32 = 1.25;
 /// How far the arrow keys move the view, in logical pixels.
 const ARROW_STEP: f64 = 60.0;
+/// How much of the picture always stays in the window, in logical pixels.
+const MIN_VISIBLE: f64 = 64.0;
 /// Two clicks closer than this in time and distance make a double-click.
 const DOUBLE_CLICK_TIME: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_DISTANCE: f32 = 4.0;
@@ -440,6 +442,8 @@ impl App {
                 scale: m.scale_factor(),
             })
             .collect();
+        // A bad settings file can hold any size; no window is bigger than every screen.
+        place.size = place.size_on(&monitors);
         if !place.is_on_screen(&monitors) {
             eprintln!("the window's last place is off screen, so the system places it");
             place.position = None;
@@ -945,10 +949,17 @@ impl App {
         }
     }
 
+    /// Keeps part of the picture in the window, however far it was moved.
+    fn keep_visible(&self, view: View) -> View {
+        let Some(content) = self.content_size() else { return view };
+        let viewport = (self.viewport.width as f32, self.viewport.height as f32);
+        view.keep_visible(content, viewport, (MIN_VISIBLE * self.scale_factor) as f32)
+    }
+
     /// Applies a zoom or move chosen by the user, which leaves fit mode.
     fn change_view(&mut self, change: impl FnOnce(View, Limits) -> View) {
         let Some(limits) = self.limits() else { return };
-        let view = change(self.view, limits);
+        let view = self.keep_visible(change(self.view, limits));
         if view != self.view {
             self.view = view;
             self.fit_mode = false;
@@ -989,7 +1000,7 @@ impl App {
             // Keep the same part of the picture in the middle of the window.
             let dx = (size.width as f32 - old.width as f32) / 2.0;
             let dy = (size.height as f32 - old.height as f32) / 2.0;
-            self.view = self.view.pan(dx, dy);
+            self.view = self.keep_visible(self.view.pan(dx, dy));
             self.view_changed();
         }
     }
@@ -1543,6 +1554,9 @@ impl ApplicationHandler<AppEvent> for App {
             // A release can be missed while another window has focus.
             WindowEvent::Focused(false) => {
                 self.drag_from = None;
+                if self.pressed.take().is_some() {
+                    self.request_redraw();
+                }
                 self.close_menu();
             }
             // Linux sends no ThemeChanged, so check again when the user comes back.

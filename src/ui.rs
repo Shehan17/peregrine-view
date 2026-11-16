@@ -48,6 +48,8 @@ const BANNER_FONT_SIZE: f32 = 14.0;
 const BANNER_PAD_X: f32 = 16.0;
 const BANNER_PAD_Y: f32 = 9.0;
 const BANNER_RADIUS: f32 = 8.0;
+/// A message longer than this many lines is cut with an ellipsis.
+const BANNER_MAX_LINES: usize = 3;
 const BANNER_FILL: [u8; 4] = [0xB3, 0x26, 0x1E, 0xF2];
 const WHITE: [u8; 3] = [0xFF, 0xFF, 0xFF];
 
@@ -1227,13 +1229,46 @@ fn banner_image(text: &TextRenderer, message: &str, scale: f32, max_width: f32) 
     let font_size = BANNER_FONT_SIZE * scale;
     let (pad_x, pad_y) = (BANNER_PAD_X * scale, BANNER_PAD_Y * scale);
     let (ascent, line_height) = text.line_metrics(font_size);
-    let width = (text.measure(message, font_size) + 2.0 * pad_x).min(max_width).ceil();
-    let height = (line_height + 2.0 * pad_y).ceil();
+    let lines = wrap_text(text, message, font_size, (max_width - 2.0 * pad_x).max(1.0), BANNER_MAX_LINES);
+    let text_width = lines.iter().map(|line| text.measure(line, font_size)).fold(0.0, f32::max);
+    let width = (text_width + 2.0 * pad_x).min(max_width).ceil();
+    let height = (line_height * lines.len() as f32 + 2.0 * pad_y).ceil();
     let mut pixmap = Pixmap::new(width as u32, height as u32)?;
     let bounds = Rect { x: 0, y: 0, w: width as i32, h: height as i32 };
     fill_rounded(&mut pixmap, bounds, BANNER_RADIUS * scale, BANNER_FILL);
-    text.draw(&mut pixmap, message, font_size, pad_x, pad_y + ascent, WHITE);
+    for (i, line) in lines.iter().enumerate() {
+        text.draw(&mut pixmap, line, font_size, pad_x, pad_y + ascent + line_height * i as f32, WHITE);
+    }
     Some(pixmap)
+}
+
+/// Breaks `s` into lines no wider than `max_width`, at spaces. A word too
+/// long for a line, or text past `max_lines`, is cut with an ellipsis.
+fn wrap_text(text: &TextRenderer, s: &str, size: f32, max_width: f32, max_lines: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut words = s.split(' ').filter(|w| !w.is_empty()).peekable();
+    while let Some(word) = words.next() {
+        if lines.len() + 1 == max_lines.max(1) {
+            // The last line takes all that is left.
+            let rest: String = std::iter::once(word).chain(words).collect::<Vec<_>>().join(" ");
+            lines.push(fit_text_end(text, &rest, size, max_width));
+            break;
+        }
+        let mut line = fit_text_end(text, word, size, max_width);
+        while let Some(next) = words.peek() {
+            let longer = format!("{line} {next}");
+            if text.measure(&longer, size) > max_width {
+                break;
+            }
+            line = longer;
+            words.next();
+        }
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 fn rounded_rect(x: f32, y: f32, width: f32, height: f32, radius: f32) -> Option<Path> {
@@ -1566,8 +1601,30 @@ mod tests {
         let text = TextRenderer::new().unwrap();
         let image = banner_image(&text, "This file isn't an SVG.", 1.0, 1000.0).unwrap();
         assert!(image.width() > 100 && image.width() < 400);
-        let narrow = banner_image(&text, "This file isn't an SVG.", 1.0, 80.0).unwrap();
-        assert_eq!(narrow.width(), 80);
+        // In a narrow window the message wraps onto more lines instead of being cut off.
+        let narrow = banner_image(&text, "This file isn't an SVG.", 1.0, 120.0).unwrap();
+        assert!(narrow.width() <= 120);
+        assert!(narrow.height() > image.height());
+    }
+
+    #[test]
+    fn banner_text_wraps_at_spaces() {
+        let text = TextRenderer::new().unwrap();
+        let size = 14.0;
+        let message = "This SVG is too large to draw at this zoom.";
+        let width = text.measure("This SVG is too", size) + 1.0;
+        let lines = wrap_text(&text, message, size, width, 10);
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|line| text.measure(line, size) <= width));
+        assert_eq!(lines.join(" "), message);
+        // Past the last line, the rest is cut with an ellipsis.
+        let cut = wrap_text(&text, message, size, width, 2);
+        assert_eq!(cut.len(), 2);
+        assert!(cut[1].ends_with('…') && text.measure(&cut[1], size) <= width);
+        // A word wider than a line is cut too.
+        let long = wrap_text(&text, "Unbreakable_long_file_name.svg", size, 60.0, 3);
+        assert!(long.len() == 1 && long[0].ends_with('…'));
+        assert_eq!(wrap_text(&text, "", size, 60.0, 3), [""]);
     }
 
     #[test]

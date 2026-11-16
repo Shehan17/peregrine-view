@@ -1,7 +1,9 @@
 //! Saves the background choices, the default editor and the window's place
 //! in the user's config folder.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::platform::Editor;
 use crate::ui::{Background, Canvas};
@@ -66,6 +68,22 @@ impl WindowPlace {
             overlap_w >= MIN_WIDTH * m.scale && overlap_h >= MIN_HEIGHT * m.scale
         })
     }
+
+    /// The size, made no larger than the largest of the `monitors`, in
+    /// logical pixels. With no monitors known, as can happen on Wayland, it
+    /// stays as it is.
+    pub fn size_on(&self, monitors: &[Monitor]) -> (u32, u32) {
+        let logical = |m: &Monitor| {
+            let scale = if m.scale > 0.0 { m.scale } else { 1.0 };
+            ((m.size.0 as f64 / scale) as u32, (m.size.1 as f64 / scale) as u32)
+        };
+        let width = monitors.iter().map(|m| logical(m).0).max();
+        let height = monitors.iter().map(|m| logical(m).1).max();
+        match (width, height) {
+            (Some(w), Some(h)) => (self.size.0.min(w).max(1), self.size.1.min(h).max(1)),
+            _ => self.size,
+        }
+    }
 }
 
 /// The settings file: `%APPDATA%\PeregrineView` on Windows,
@@ -93,9 +111,20 @@ pub fn load() -> Settings {
         .unwrap_or_default()
 }
 
+/// Numbers each save in the order the app asked for it.
+static NEXT_SAVE: AtomicU64 = AtomicU64::new(1);
+/// The number of the save on disk. Held while writing, so only one write
+/// runs at a time.
+static WRITTEN: Mutex<u64> = Mutex::new(0);
+
 /// Writes the settings on a background thread, so the window never waits on the disk.
 pub fn save(settings: Settings) {
-    let spawned = std::thread::Builder::new().name("settings".into()).spawn(move || save_now(&settings));
+    let number = NEXT_SAVE.fetch_add(1, Ordering::Relaxed);
+    let spawned = std::thread::Builder::new().name("settings".into()).spawn(move || {
+        if let Some(path) = settings_path() {
+            write_if_newer(&WRITTEN, number, &settings, &path);
+        }
+    });
     if let Err(e) = spawned {
         eprintln!("could not start settings thread: {e}");
     }
@@ -104,7 +133,21 @@ pub fn save(settings: Settings) {
 /// Writes the settings and waits until they are on disk. For when the app
 /// closes, which would stop a background thread halfway.
 pub fn save_now(settings: &Settings) {
-    let Some(path) = settings_path() else { return };
+    let number = NEXT_SAVE.fetch_add(1, Ordering::Relaxed);
+    if let Some(path) = settings_path() {
+        write_if_newer(&WRITTEN, number, settings, &path);
+    }
+}
+
+/// Writes save `number` to `path`, unless a later save is on disk already.
+/// Saves run on their own threads and can finish in any order, so without
+/// this an older choice could overwrite a newer one.
+fn write_if_newer(written: &Mutex<u64>, number: u64, settings: &Settings, path: &Path) {
+    // A panic elsewhere can't leave the number half changed, so a poisoned lock is still good.
+    let mut written = written.lock().unwrap_or_else(|e| e.into_inner());
+    if *written > number {
+        return;
+    }
     let write = || -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -112,10 +155,11 @@ pub fn save_now(settings: &Settings) {
         // Write a temporary file and rename it, so a crash never leaves half a file.
         let temp = path.with_extension("txt.tmp");
         std::fs::write(&temp, serialize(settings))?;
-        std::fs::rename(&temp, &path)
+        std::fs::rename(&temp, path)
     };
-    if let Err(e) = write() {
-        eprintln!("could not save settings to {}: {e}", path.display());
+    match write() {
+        Ok(()) => *written = number,
+        Err(e) => eprintln!("could not save settings to {}: {e}", path.display()),
     }
 }
 
@@ -253,6 +297,18 @@ mod tests {
     }
 
     #[test]
+    fn window_size_fits_the_largest_screen() {
+        let main = Monitor { position: (0, 0), size: (1920, 1080), scale: 1.0 };
+        let left = Monitor { position: (-2560, 0), size: (2560, 1440), scale: 2.0 };
+        let sized = |w, h| WindowPlace { position: None, size: (w, h), maximized: false };
+        assert_eq!(sized(1024, 768).size_on(&[main, left]), (1024, 768));
+        // The 2560x1440 screen at 200% is 1280x720 logical, so the main one is largest.
+        assert_eq!(sized(100_000, 100_000).size_on(&[main, left]), (1920, 1080));
+        assert_eq!(sized(100_000, 100_000).size_on(&[left]), (1280, 720));
+        assert_eq!(sized(100_000, 100_000).size_on(&[]), (100_000, 100_000));
+    }
+
+    #[test]
     fn an_editor_needs_an_id_and_a_name() {
         assert_eq!(parse("editor=C:\\a.exe\n").editor, None);
         assert_eq!(parse("editor_name=A\n").editor, None);
@@ -260,6 +316,22 @@ mod tests {
         // Store app IDs can contain `=`; only the first one splits the line.
         let editor = parse("editor=App!a=b\neditor_name=A\n").editor;
         assert_eq!(editor.map(|e| e.id), Some("App!a=b".into()));
+    }
+
+    #[test]
+    fn an_older_save_never_overwrites_a_newer_one() {
+        let dir = std::env::temp_dir().join(format!("peregrineview-settings-{}", std::process::id()));
+        let path = dir.join("settings.txt");
+        let written = Mutex::new(0);
+        let dark = Settings { background: Background::Dark, ..Settings::default() };
+        let white = Settings { background: Background::White, ..Settings::default() };
+        // Save 2 finishes before save 1.
+        write_if_newer(&written, 2, &dark, &path);
+        write_if_newer(&written, 1, &white, &path);
+        assert_eq!(parse(&std::fs::read_to_string(&path).unwrap()), dark);
+        write_if_newer(&written, 3, &white, &path);
+        assert_eq!(parse(&std::fs::read_to_string(&path).unwrap()), white);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

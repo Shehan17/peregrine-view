@@ -13,8 +13,10 @@ use winit::event_loop::EventLoopProxy;
 
 use crate::AppEvent;
 
-/// Unzipped files larger than this are refused, which also stops zip bombs.
-const MAX_UNZIPPED_BYTES: u64 = 512 * 1024 * 1024;
+/// SVGs larger than this, on disk or once unzipped, are refused. Parsing one
+/// takes several times its size in memory, and running out stops the app.
+/// It also stops zip bombs.
+const MAX_SVG_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Where an SVG comes from.
 pub enum Source {
@@ -126,20 +128,14 @@ pub fn load(source: &Source) -> Result<Document, LoadError> {
     let start = Instant::now();
     let doc = match source {
         Source::File(path) => {
-            let bytes = std::fs::read(path).map_err(|e| match e.kind() {
-                std::io::ErrorKind::NotFound => LoadError::NotFound,
-                _ => {
-                    eprintln!("read failed: {}: {e}", path.display());
-                    LoadError::Unreadable
-                }
-            })?;
+            let bytes = read_file(path, MAX_SVG_BYTES)?;
             let file_size = bytes.len() as u64;
             let bytes = if is_gzip(&bytes) { gunzip(&bytes)? } else { bytes };
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string());
-            let mut doc = parse(&decode_text(&bytes), path.parent(), name, Some(path.clone()))?;
+            let mut doc = parse(&decode_text(bytes), path.parent(), name, Some(path.clone()))?;
             doc.file_size = Some(file_size);
             doc
         }
@@ -210,8 +206,21 @@ fn picture_size(tree: &usvg::Tree, root: &RootTag) -> Result<((f32, f32), Transf
             Ok(((vw, vh), base))
         }
         Some(_) => Ok((tree_size, Transform::identity())),
-        // No viewBox and no complete size: measure the drawing itself.
-        None if width_missing || height_missing => {
+        // No viewBox and only one size: keep it, and take the other from how
+        // far the drawing reaches, so it all shows.
+        None if width_missing != height_missing => {
+            // usvg sizes such a file by the drawing alone, so read the given size here.
+            let bounds = tree.root().abs_stroke_bounding_box();
+            let given = |value: &Option<String>, reach: f32| value.as_deref().and_then(parse_length).unwrap_or(reach);
+            let width = if width_missing { bounds.right() } else { given(&root.width, bounds.right()) };
+            let height = if height_missing { bounds.bottom() } else { given(&root.height, bounds.bottom()) };
+            if !(width > 0.0 && height > 0.0) {
+                return Err(LoadError::Empty);
+            }
+            Ok(((width, height), Transform::identity()))
+        }
+        // No viewBox and no size: measure the drawing itself.
+        None if width_missing && height_missing => {
             let bounds = tree.root().abs_stroke_bounding_box();
             if !(bounds.width() > 0.0 && bounds.height() > 0.0) {
                 return Err(LoadError::Empty);
@@ -223,6 +232,34 @@ fn picture_size(tree: &usvg::Tree, root: &RootTag) -> Result<((f32, f32), Transf
     }
 }
 
+/// Reads the file at `path`, refusing one larger than `limit` bytes before
+/// reading it, and stopping there if it grows while being read.
+fn read_file(path: &Path, limit: u64) -> Result<Vec<u8>, LoadError> {
+    let failed = |e: std::io::Error| match e.kind() {
+        std::io::ErrorKind::NotFound => LoadError::NotFound,
+        _ => {
+            eprintln!("read failed: {}: {e}", path.display());
+            LoadError::Unreadable
+        }
+    };
+    let file = std::fs::File::open(path).map_err(failed)?;
+    let len = file.metadata().map_err(failed)?.len();
+    if len > limit {
+        eprintln!("{} is {len} bytes", path.display());
+        return Err(LoadError::TooLarge);
+    }
+    let mut bytes = Vec::new();
+    if bytes.try_reserve_exact(len as usize).is_err() {
+        return Err(LoadError::TooLarge);
+    }
+    // The file can grow between the size check and the read.
+    file.take(limit + 1).read_to_end(&mut bytes).map_err(failed)?;
+    if bytes.len() as u64 > limit {
+        return Err(LoadError::TooLarge);
+    }
+    Ok(bytes)
+}
+
 fn is_gzip(bytes: &[u8]) -> bool {
     bytes.starts_with(&[0x1f, 0x8b])
 }
@@ -230,13 +267,13 @@ fn is_gzip(bytes: &[u8]) -> bool {
 fn gunzip(bytes: &[u8]) -> Result<Vec<u8>, LoadError> {
     let mut out = Vec::new();
     flate2::read::GzDecoder::new(bytes)
-        .take(MAX_UNZIPPED_BYTES + 1)
+        .take(MAX_SVG_BYTES + 1)
         .read_to_end(&mut out)
         .map_err(|e| {
             eprintln!("gunzip failed: {e}");
             LoadError::NotSvg
         })?;
-    if out.len() as u64 > MAX_UNZIPPED_BYTES {
+    if out.len() as u64 > MAX_SVG_BYTES {
         return Err(LoadError::TooLarge);
     }
     Ok(out)
@@ -244,10 +281,12 @@ fn gunzip(bytes: &[u8]) -> Result<Vec<u8>, LoadError> {
 
 /// Decodes UTF-8 (with or without BOM) and UTF-16 (LE or BE, with or without
 /// BOM). Anything that isn't valid UTF-8 is read as Latin-1, which keeps
-/// older files with a few accented characters readable.
-fn decode_text(bytes: &[u8]) -> String {
-    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-        return String::from_utf8_lossy(rest).into_owned();
+/// older files with a few accented characters readable. Valid UTF-8, by far
+/// the most common, keeps `bytes` instead of copying them.
+fn decode_text(mut bytes: Vec<u8>) -> String {
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        bytes.drain(..3);
+        return String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
     }
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
         return decode_utf16(rest, u16::from_le_bytes);
@@ -255,15 +294,17 @@ fn decode_text(bytes: &[u8]) -> String {
     if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
         return decode_utf16(rest, u16::from_be_bytes);
     }
-    // UTF-16 without a BOM: the first character is `<`, which is ASCII.
-    match bytes {
-        [b'<', 0, ..] => return decode_utf16(bytes, u16::from_le_bytes),
-        [0, b'<', ..] => return decode_utf16(bytes, u16::from_be_bytes),
+    // UTF-16 without a BOM: the first character is `<` or white space, both
+    // ASCII, so one of its two bytes is 0. UTF-8 text never starts with a 0.
+    let starts_xml = |b: u8| b == b'<' || b.is_ascii_whitespace();
+    match bytes[..] {
+        [b, 0, ..] if starts_xml(b) => return decode_utf16(&bytes, u16::from_le_bytes),
+        [0, b, ..] if starts_xml(b) => return decode_utf16(&bytes, u16::from_be_bytes),
         _ => {}
     }
-    match std::str::from_utf8(bytes) {
-        Ok(text) => text.to_owned(),
-        Err(_) => bytes.iter().map(|&b| char::from(b)).collect(),
+    match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(e) => e.as_bytes().iter().map(|&b| char::from(b)).collect(),
     }
 }
 
@@ -348,6 +389,26 @@ fn is_missing_length(value: Option<&str>) -> bool {
     }
 }
 
+/// Converts a length like "300", "20px" or "5cm" to pixels at 96 DPI. None
+/// for a unit that needs a font or a parent size, like `em` or `%`.
+fn parse_length(value: &str) -> Option<f32> {
+    let value = value.trim();
+    // The unit is the letters at the end, so "1e2" is a number with no unit.
+    let number = value.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let unit = &value[number.len()..];
+    let per_unit = match unit {
+        "" | "px" => 1.0,
+        "in" => 96.0,
+        "cm" => 96.0 / 2.54,
+        "mm" => 96.0 / 25.4,
+        "pt" => 96.0 / 72.0,
+        "pc" => 16.0,
+        _ => return None,
+    };
+    let length = number.trim().parse::<f32>().ok()? * per_unit;
+    (length.is_finite() && length > 0.0).then_some(length)
+}
+
 /// Returns the width and height of a valid viewBox.
 fn parse_view_box(value: &str) -> Option<(f32, f32)> {
     let numbers: Vec<f32> = value
@@ -394,10 +455,10 @@ mod tests {
 
     #[test]
     fn decodes_utf8_with_and_without_bom() {
-        assert_eq!(decode_text("<svg>é</svg>".as_bytes()), "<svg>é</svg>");
+        assert_eq!(decode_text("<svg>é</svg>".into()), "<svg>é</svg>");
         let mut with_bom = vec![0xEF, 0xBB, 0xBF];
         with_bom.extend_from_slice("<svg>é</svg>".as_bytes());
-        assert_eq!(decode_text(&with_bom), "<svg>é</svg>");
+        assert_eq!(decode_text(with_bom), "<svg>é</svg>");
     }
 
     #[test]
@@ -405,15 +466,36 @@ mod tests {
         let text = "<svg>é</svg>";
         let le: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
         let be: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
-        assert_eq!(decode_text(&[&[0xFF, 0xFE][..], &le].concat()), text);
-        assert_eq!(decode_text(&[&[0xFE, 0xFF][..], &be].concat()), text);
-        assert_eq!(decode_text(&le), text);
-        assert_eq!(decode_text(&be), text);
+        assert_eq!(decode_text([&[0xFF, 0xFE][..], &le].concat()), text);
+        assert_eq!(decode_text([&[0xFE, 0xFF][..], &be].concat()), text);
+        assert_eq!(decode_text(le), text);
+        assert_eq!(decode_text(be), text);
+        // No BOM, and a line break before the first tag.
+        let text = "
+<svg/>";
+        let le: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let be: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        assert_eq!(decode_text(le), text);
+        assert_eq!(decode_text(be), text);
     }
 
     #[test]
     fn invalid_utf8_reads_as_latin1() {
-        assert_eq!(decode_text(b"<svg>caf\xe9</svg>"), "<svg>café</svg>");
+        assert_eq!(decode_text(b"<svg>caf\xe9</svg>".to_vec()), "<svg>café</svg>");
+        // After a UTF-8 BOM, bad bytes become replacement characters.
+        assert_eq!(decode_text(b"\xEF\xBB\xBF<svg>\xff</svg>".to_vec()), "<svg>\u{FFFD}</svg>");
+    }
+
+    #[test]
+    fn files_over_the_limit_are_refused() {
+        let dir = std::env::temp_dir().join(format!("peregrineview-large-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("large.svg");
+        std::fs::write(&path, SQUARE).unwrap();
+        let len = SQUARE.len() as u64;
+        assert!(matches!(read_file(&path, len - 1), Err(LoadError::TooLarge)));
+        assert_eq!(read_file(&path, len).unwrap(), SQUARE.as_bytes());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -446,6 +528,19 @@ mod tests {
         assert!(is_missing_length(Some(" auto ")));
         assert!(!is_missing_length(Some("10")));
         assert!(!is_missing_length(Some("2in")));
+    }
+
+    #[test]
+    fn length_parsing() {
+        assert_eq!(parse_length("300"), Some(300.0));
+        assert_eq!(parse_length(" 20px "), Some(20.0));
+        assert!(approx(parse_length("2.54cm").unwrap(), 96.0));
+        assert!(approx(parse_length("1e2").unwrap(), 100.0));
+        assert_eq!(parse_length("6pc"), Some(96.0));
+        assert_eq!(parse_length("2em"), None);
+        assert_eq!(parse_length("0"), None);
+        assert_eq!(parse_length("-5"), None);
+        assert_eq!(parse_length("wide"), None);
     }
 
     #[test]
@@ -493,6 +588,17 @@ mod tests {
         let doc = load_text(r#"<svg xmlns="http://www.w3.org/2000/svg"><rect x="500" y="200" width="80" height="40"/></svg>"#).unwrap();
         assert_eq!(doc.size, (80.0, 40.0));
         assert_eq!(doc.base, Transform::from_translate(-500.0, -200.0));
+    }
+
+    #[test]
+    fn one_size_keeps_it_and_measures_the_other() {
+        let doc = load_text(r#"<svg xmlns="http://www.w3.org/2000/svg" width="300"><rect x="10" y="20" width="80" height="40"/></svg>"#).unwrap();
+        assert_eq!(doc.size, (300.0, 60.0));
+        assert_eq!(doc.base, Transform::identity());
+        let doc = load_text(r#"<svg xmlns="http://www.w3.org/2000/svg" width="3in" height="50%"><rect x="10" y="20" width="80" height="40"/></svg>"#).unwrap();
+        assert_eq!(doc.size, (288.0, 60.0));
+        let doc = load_text(r#"<svg xmlns="http://www.w3.org/2000/svg" height="200"><rect x="10" y="20" width="80" height="40"/></svg>"#).unwrap();
+        assert_eq!(doc.size, (90.0, 200.0));
     }
 
     #[test]

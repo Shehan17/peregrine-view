@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use resvg::tiny_skia::{IntSize, Pixmap, Transform};
+use resvg::tiny_skia::{PixmapMut, Transform};
 use resvg::usvg;
 use winit::event_loop::EventLoopProxy;
 
@@ -95,26 +95,33 @@ fn worker(rx: Receiver<Job>, proxy: EventLoopProxy<AppEvent>) {
 /// Renders `job`, or returns None when there isn't memory for it.
 fn render(job: &Job) -> Option<Frame> {
     let start = Instant::now();
+    // One buffer does it all, so a 4K render needs 33 MB and not three times that:
+    // the backdrop is painted into it, resvg draws over it, and it becomes the frame.
     let len = job.width as usize * job.height as usize;
-    let mut data = try_vec(len.checked_mul(4)?)?;
-    data.resize(len * 4, 0);
-    let mut pixmap = Pixmap::from_vec(data, IntSize::from_wh(job.width, job.height)?)?;
-    let mut backdrop = try_vec(len)?;
-    backdrop.resize(len, 0);
+    let byte_len = len.checked_mul(4)?;
+    let mut pixels = try_vec(len)?;
+    pixels.resize(len, 0);
     let (w, h) = job.picture_size;
     let picture = (job.view.tx, job.view.ty, w * job.view.scale, h * job.view.scale);
-    paint_backdrop(&mut backdrop, (job.width, job.height), picture, job.backdrop);
-    for (dst, src) in pixmap.data_mut().as_chunks_mut::<4>().0.iter_mut().zip(&backdrop) {
-        let [_, r, g, b] = src.to_be_bytes();
-        *dst = [r, g, b, 255];
+    paint_backdrop(&mut pixels, (job.width, job.height), picture, job.backdrop);
+    // From 0x00RRGGBB to the RGBA bytes resvg draws on.
+    for pixel in &mut pixels {
+        let [_, r, g, b] = pixel.to_be_bytes();
+        *pixel = u32::from_ne_bytes([r, g, b, 255]);
     }
-    let transform = job.view.transform().pre_concat(job.base);
-    resvg::render(&job.tree, transform, &mut pixmap.as_mut());
-
-    // The background is opaque, so premultiplied RGBA is already plain RGB.
-    let (rgba, _) = pixmap.data().as_chunks::<4>();
-    let mut pixels = try_vec(len)?;
-    pixels.extend(rgba.iter().map(|&[r, g, b, _]| (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)));
+    {
+        // SAFETY: the bytes are the `len` u32s of `pixels`, which outlive this
+        // borrow. u8 needs no alignment and any byte value is a valid u8.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(pixels.as_mut_ptr().cast::<u8>(), byte_len) };
+        let mut pixmap = PixmapMut::from_bytes(bytes, job.width, job.height)?;
+        let transform = job.view.transform().pre_concat(job.base);
+        resvg::render(&job.tree, transform, &mut pixmap);
+    }
+    // And back. The background is opaque, so premultiplied RGBA is already plain RGB.
+    for pixel in &mut pixels {
+        let [r, g, b, _] = pixel.to_ne_bytes();
+        *pixel = u32::from_be_bytes([0, r, g, b]);
+    }
     Some(Frame {
         generation: job.generation,
         doc: job.doc,
@@ -274,6 +281,33 @@ mod tests {
         // The picture starts above and left of the window.
         paint_backdrop(&mut pixels, (3, 3), (-1.0, -1.0, 3.0, 3.0), backdrop);
         assert_eq!(pixels, vec![1, 2, 0, 2, 1, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn renders_the_picture_over_its_backdrop() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="1" height="2" fill="red"/></svg>"#;
+        let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).unwrap();
+        let job = Job {
+            generation: 7,
+            doc: 1,
+            tree: Arc::new(tree),
+            base: Transform::identity(),
+            picture_size: (2.0, 2.0),
+            view: view(1.0, 1.0, 1.0),
+            width: 4,
+            height: 4,
+            backdrop: Backdrop { canvas: 0x111111, picture: Fill::Solid(0xFFFFFF) },
+        };
+        let frame = render(&job).unwrap();
+        assert_eq!(frame.generation, 7);
+        let (c, r, w) = (0x111111, 0xFF0000, 0xFFFFFF);
+        #[rustfmt::skip]
+        assert_eq!(frame.pixels, vec![
+            c, c, c, c,
+            c, r, w, c,
+            c, r, w, c,
+            c, c, c, c,
+        ]);
     }
 
     #[test]

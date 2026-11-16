@@ -9,7 +9,7 @@ pub fn list_svgs(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file() || t.is_symlink()))
         .map(|entry| entry.path())
-        .filter(|path| is_svg_name(path))
+        .filter(|path| is_listed(path))
         .collect();
     files.sort_by(|a, b| compare_names(a, b));
     Ok(files)
@@ -28,10 +28,21 @@ pub fn has_others(file: &Path) -> bool {
     }
 }
 
-pub fn is_svg_name(path: &Path) -> bool {
+/// True for a file Next and Previous go to.
+pub fn is_listed(path: &Path) -> bool {
+    is_svg_name(path) && !is_apple_double(path)
+}
+
+fn is_svg_name(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("svg") || e.eq_ignore_ascii_case("svgz"))
+}
+
+/// True for `._name.svg`, the hidden file macOS writes next to `name.svg` on
+/// USB, network and other non-Mac drives. It holds Finder data, not an SVG.
+fn is_apple_double(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n.as_encoded_bytes().starts_with(b"._"))
 }
 
 fn name_of(path: &Path) -> String {
@@ -151,7 +162,7 @@ mod tests {
     fn lists_only_svg_files_in_order() {
         let dir = std::env::temp_dir().join(format!("peregrineview-nav-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("sub.svg")).unwrap();
-        for name in ["b.SVG", "a.svgz", "c.png", "notes.txt", "a10.svg", "a9.svg"] {
+        for name in ["b.SVG", "a.svgz", "c.png", "notes.txt", "a10.svg", "a9.svg", "._a9.svg"] {
             std::fs::write(dir.join(name), "x").unwrap();
         }
         let files = list_svgs(&dir).unwrap();

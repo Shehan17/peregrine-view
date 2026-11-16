@@ -25,7 +25,7 @@ pub fn watch(path: &Path, proxy: EventLoopProxy<AppEvent>) -> Option<FileWatcher
             let _ = proxy.send_event(AppEvent::FileChanged(changed_path.clone()));
         }
         // Another SVG came or went, which can show or hide Previous and Next.
-        Ok(event) if is_add_or_remove(&event.kind) && event.paths.iter().any(|p| crate::nav::is_svg_name(p)) => {
+        Ok(event) if is_add_or_remove(&event.kind) && event.paths.iter().any(|p| crate::nav::is_listed(p)) => {
             let _ = proxy.send_event(AppEvent::FolderChanged);
         }
         Ok(_) => {}
