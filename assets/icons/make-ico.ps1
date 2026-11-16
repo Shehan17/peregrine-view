@@ -1,9 +1,9 @@
-# Builds assets/icons/icon.ico from assets/App_Icon.png. Run it again after
+# Builds assets/icons/icon.ico from assets/icons/AppIcon.png. Run it again after
 # changing the app icon: powershell -File assets/icons/make-ico.ps1
 # Small sizes are plain bitmaps, which every tool reads; 256 px is a PNG.
 Add-Type -AssemblyName System.Drawing
 $root = (Resolve-Path "$PSScriptRoot\..\..").Path
-$source = [System.Drawing.Image]::FromFile("$root\assets\App_Icon.png")
+$source = [System.Drawing.Image]::FromFile("$PSScriptRoot\AppIcon.png")
 $sizes = 16, 20, 24, 32, 40, 48, 64, 128, 256
 $images = foreach ($size in $sizes) {
     $bmp = New-Object System.Drawing.Bitmap $size, $size, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)

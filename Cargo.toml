@@ -45,7 +45,7 @@ identifier = "com.peregrineview.viewer"
 before-packaging-command = "cargo build --release --locked"
 out-dir = "dist"
 formats = ["nsis"]
-icons = ["assets/icons/icon.ico", "assets/App_Icon.png"]
+icons = ["assets/icons/icon.ico", "assets/icons/AppIcon.png"]
 
 [package.metadata.packager.nsis]
 # The default template with a fixed uninstaller; see the top of the file.

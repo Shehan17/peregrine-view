@@ -6,7 +6,7 @@ use winit::event_loop::EventLoopProxy;
 
 use crate::AppEvent;
 
-static APP_ICON: &[u8] = include_bytes!("../assets/App_Icon.png");
+static APP_ICON: &[u8] = include_bytes!("../assets/icons/AppIcon.png");
 
 /// Title bar icon size, in pixels.
 const SMALL: u32 = 32;
@@ -88,8 +88,11 @@ mod tests {
         assert_eq!(icons.small.size, SMALL);
         assert_eq!(icons.small.rgba.len(), (SMALL * SMALL * 4) as usize);
         assert_eq!(icons.large.rgba.len(), (LARGE * LARGE * 4) as usize);
-        // The icon is opaque, and its top left corner is the bright green.
-        assert_eq!(icons.small.rgba[3], 255);
-        assert!(icons.small.rgba[1] > 200 && icons.small.rgba[0] < 100);
+        // The corners are rounded off (mostly clear), and the middle is the dark eye.
+        assert!(icons.small.rgba[3] < 128);
+        let middle = ((SMALL / 2 * SMALL + SMALL / 2) * 4) as usize;
+        let eye = &icons.small.rgba[middle..middle + 4];
+        assert_eq!(eye[3], 255);
+        assert!(eye[0] < 60 && eye[1] < 60 && eye[2] < 60);
     }
 }

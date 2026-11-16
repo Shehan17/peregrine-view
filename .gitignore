@@ -2,3 +2,6 @@
 /dist
 # Made by `cargo run --release --example large_svg`.
 /test-svgs/large-map.svg
+
+# Icon drafts. They hold a reference photo that isn't ours to share.
+/assets/icons/drafts/
