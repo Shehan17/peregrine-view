@@ -107,8 +107,11 @@ struct Palette {
     icon: [u8; 3],
     text: [u8; 3],
     muted: [u8; 3],
+    /// The Open button on the empty screen.
     accent: [u8; 4],
     accent_hover: [u8; 4],
+    /// The Open button's label. Dark, since white is unreadable on the yellow.
+    accent_text: [u8; 3],
     drop_border: [u8; 4],
     drop_active: [u8; 4],
 }
@@ -124,10 +127,12 @@ const LIGHT: Palette = Palette {
     icon: [0x2B, 0x2B, 0x2B],
     text: [0x1F, 0x1F, 0x1F],
     muted: [0x6B, 0x6B, 0x6B],
-    accent: [0x25, 0x63, 0xEB, 0xFF],
-    accent_hover: [0x1D, 0x4E, 0xD8, 0xFF],
+    accent: [0xF7, 0xDB, 0x04, 0xFF],
+    accent_hover: [0xE6, 0xCB, 0x03, 0xFF],
+    accent_text: [0x1F, 0x1F, 0x1F],
     drop_border: [0x00, 0x00, 0x00, 0x40],
-    drop_active: [0x25, 0x63, 0xEB, 0xFF],
+    // The accent yellow is too faint for thin lines on a light background.
+    drop_active: [0x9C, 0x82, 0x00, 0xFF],
 };
 
 const DARK: Palette = Palette {
@@ -141,10 +146,11 @@ const DARK: Palette = Palette {
     icon: [0xE8, 0xE8, 0xE8],
     text: [0xF0, 0xF0, 0xF0],
     muted: [0xA8, 0xA8, 0xA8],
-    accent: [0x25, 0x63, 0xEB, 0xFF],
-    accent_hover: [0x3B, 0x76, 0xF0, 0xFF],
+    accent: [0xF7, 0xDB, 0x04, 0xFF],
+    accent_hover: [0xF9, 0xE2, 0x3A, 0xFF],
+    accent_text: [0x1F, 0x1F, 0x1F],
     drop_border: [0xFF, 0xFF, 0xFF, 0x47],
-    drop_active: [0x60, 0x9B, 0xF5, 0xFF],
+    drop_active: [0xF7, 0xDB, 0x04, 0xFF],
 };
 
 impl Theme {
@@ -1046,7 +1052,7 @@ fn draw_empty(
     let label = "Open file…";
     let x = button.x as f32 + (button.w as f32 - text.measure(label, size)) / 2.0;
     let y = button.y as f32 + (button.h as f32 - line_height) / 2.0 + ascent;
-    text.draw(&mut pixmap, label, size, x.round(), y.round(), WHITE);
+    text.draw(&mut pixmap, label, size, x.round(), y.round(), palette.accent_text);
     Some(pixmap)
 }
 
