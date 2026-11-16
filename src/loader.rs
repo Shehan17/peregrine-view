@@ -1,5 +1,5 @@
 //! Reads an SVG and parses it into a usvg tree on a background thread.
-//! Handles gzip, text encodings and the size rules listed in CONTRIBUTING.md.
+//! Handles gzip, text encodings and the size rules (viewBox, content bounds, real units).
 
 use std::fmt;
 use std::io::Read;

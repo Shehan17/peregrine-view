@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-PeregrineView is a fast, lightweight SVG viewer in Rust (winit + softbuffer + resvg, CPU rendering, no GPU or web engine). `CONTRIBUTING.md` holds the performance targets, the code rules, the compatibility rules and what is out of scope (editing, animation, scripts, tabs, multiple windows, settings window, GPU renderer); keep it in step when any of these change. `README.md` lists the features and keyboard shortcuts. Commit messages are plain sentences that say what changed.
+PeregrineView is a fast, lightweight SVG viewer in Rust (winit + softbuffer + resvg, CPU rendering, no GPU or web engine). `CONTRIBUTING.md` holds the main targets, the code rules and what is out of scope (editing, animation, scripts, tabs, multiple windows, settings window, GPU renderer); keep it short and in step when these change. The full targets: first window under 100 ms, first picture under 50 ms, 60 fps while moving, release exe under 5 MB, under 50 MB memory, 0% idle CPU, and huge files never freeze the window. `README.md` lists the features and keyboard shortcuts. Commit messages are plain sentences that say what changed.
 
 ## Commands
 
@@ -28,7 +28,7 @@ cargo clippy --target x86_64-unknown-linux-gnu --all-targets
 
 Do not run `cargo fmt`: the code is not rustfmt-formatted (it uses longer lines and one-line `let ... else { return };`), and running it would rewrite every file.
 
-Release builds on Windows use `windows_subsystem = "windows"`, so stderr is only visible in debug builds. The debug log prints `window created …` and `first picture … after start` timings, plus per-render and per-present times. Use these to check against the targets in CONTRIBUTING.md (first window under 100 ms, first picture under 50 ms in release). To see the log of a release build, read stderr through a pipe (e.g. .NET `Process` with `RedirectStandardError`): redirecting it to a file costs about 3 ms per line on Windows and makes startup look much slower than it is. Most of the time to first window is Windows creating the window; the app reaches `create_window` in a few milliseconds.
+Release builds on Windows use `windows_subsystem = "windows"`, so stderr is only visible in debug builds. The debug log prints `window created …` and `first picture … after start` timings, plus per-render and per-present times. Use these to check against the targets (first window under 100 ms, first picture under 50 ms in release). To see the log of a release build, read stderr through a pipe (e.g. .NET `Process` with `RedirectStandardError`): redirecting it to a file costs about 3 ms per line on Windows and makes startup look much slower than it is. Most of the time to first window is Windows creating the window; the app reaches `create_window` in a few milliseconds.
 
 ## Architecture
 
