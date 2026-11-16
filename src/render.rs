@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use resvg::tiny_skia::{Pixmap, Transform};
+use resvg::tiny_skia::{IntSize, Pixmap, Transform};
 use resvg::usvg;
 use winit::event_loop::EventLoopProxy;
 
@@ -79,20 +79,28 @@ fn worker(rx: Receiver<Job>, proxy: EventLoopProxy<AppEvent>) {
         while let Ok(newer) = rx.try_recv() {
             job = newer;
         }
-        let Some(frame) = render(&job) else {
-            eprintln!("could not allocate a {}x{} render", job.width, job.height);
-            continue;
+        let event = match render(&job) {
+            Some(frame) => AppEvent::Rendered(frame),
+            None => {
+                eprintln!("could not allocate a {}x{} render", job.width, job.height);
+                AppEvent::RenderFailed { generation: job.generation }
+            }
         };
-        if proxy.send_event(AppEvent::Rendered(frame)).is_err() {
+        if proxy.send_event(event).is_err() {
             break; // The event loop has exited.
         }
     }
 }
 
+/// Renders `job`, or returns None when there isn't memory for it.
 fn render(job: &Job) -> Option<Frame> {
     let start = Instant::now();
-    let mut pixmap = Pixmap::new(job.width, job.height)?;
-    let mut backdrop = vec![0; job.width as usize * job.height as usize];
+    let len = job.width as usize * job.height as usize;
+    let mut data = try_vec(len.checked_mul(4)?)?;
+    data.resize(len * 4, 0);
+    let mut pixmap = Pixmap::from_vec(data, IntSize::from_wh(job.width, job.height)?)?;
+    let mut backdrop = try_vec(len)?;
+    backdrop.resize(len, 0);
     let (w, h) = job.picture_size;
     let picture = (job.view.tx, job.view.ty, w * job.view.scale, h * job.view.scale);
     paint_backdrop(&mut backdrop, (job.width, job.height), picture, job.backdrop);
@@ -105,10 +113,8 @@ fn render(job: &Job) -> Option<Frame> {
 
     // The background is opaque, so premultiplied RGBA is already plain RGB.
     let (rgba, _) = pixmap.data().as_chunks::<4>();
-    let pixels = rgba
-        .iter()
-        .map(|&[r, g, b, _]| (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b))
-        .collect();
+    let mut pixels = try_vec(len)?;
+    pixels.extend(rgba.iter().map(|&[r, g, b, _]| (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)));
     Some(Frame {
         generation: job.generation,
         doc: job.doc,
@@ -119,6 +125,14 @@ fn render(job: &Job) -> Option<Frame> {
         pixels,
         took: start.elapsed(),
     })
+}
+
+/// An empty vector with room for `len` items, or None when there isn't memory
+/// for it. A plain `vec!` would stop the app instead.
+fn try_vec<T>(len: usize) -> Option<Vec<T>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(len).ok()?;
+    Some(v)
 }
 
 /// Fills `pixels` with the canvas color, and the `picture` rectangle

@@ -24,6 +24,10 @@ pub fn watch(path: &Path, proxy: EventLoopProxy<AppEvent>) -> Option<FileWatcher
         Ok(event) if is_change(&event.kind) && event.paths.iter().any(|p| same_name(p, &name)) => {
             let _ = proxy.send_event(AppEvent::FileChanged(changed_path.clone()));
         }
+        // Another SVG came or went, which can show or hide Previous and Next.
+        Ok(event) if is_add_or_remove(&event.kind) && event.paths.iter().any(|p| crate::nav::is_svg_name(p)) => {
+            let _ = proxy.send_event(AppEvent::FolderChanged);
+        }
         Ok(_) => {}
         Err(e) => eprintln!("file watcher: {e}"),
     };
@@ -55,6 +59,11 @@ fn is_change(kind: &EventKind) -> bool {
     }
 }
 
+/// True for events that can add a file to the folder or take one away.
+fn is_add_or_remove(kind: &EventKind) -> bool {
+    matches!(kind, EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_)) | EventKind::Any)
+}
+
 fn same_name(path: &Path, name: &OsString) -> bool {
     match path.file_name() {
         Some(n) if n == name => true,
@@ -69,7 +78,7 @@ fn same_name(path: &Path, name: &OsString) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::event::{AccessKind, AccessMode, CreateKind, DataChange, MetadataKind};
+    use notify::event::{AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, RemoveKind, RenameMode};
 
     #[test]
     fn only_writes_count_as_changes() {
@@ -79,6 +88,15 @@ mod tests {
         assert!(!is_change(&EventKind::Access(AccessKind::Read)));
         assert!(!is_change(&EventKind::Access(AccessKind::Close(AccessMode::Read))));
         assert!(!is_change(&EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime))));
+    }
+
+    #[test]
+    fn adds_and_removes_change_the_folder() {
+        assert!(is_add_or_remove(&EventKind::Create(CreateKind::File)));
+        assert!(is_add_or_remove(&EventKind::Remove(RemoveKind::File)));
+        assert!(is_add_or_remove(&EventKind::Modify(ModifyKind::Name(RenameMode::Both))));
+        assert!(!is_add_or_remove(&EventKind::Modify(ModifyKind::Data(DataChange::Content))));
+        assert!(!is_add_or_remove(&EventKind::Access(AccessKind::Close(AccessMode::Write))));
     }
 
     #[test]

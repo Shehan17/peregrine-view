@@ -28,6 +28,12 @@ pub enum AppEvent {
     /// The open file changed on disk.
     FileChanged(PathBuf),
     Rendered(render::Frame),
+    /// There wasn't memory to draw render job `generation`.
+    RenderFailed { generation: u64 },
+    /// Whether the folder of `path` has SVGs other than it, for Next and Previous.
+    FolderChecked { path: PathBuf, others: bool },
+    /// An SVG other than the open file was added to, removed from or renamed in its folder.
+    FolderChanged,
     /// The Open dialog closed, with the chosen file if there is one.
     DialogClosed(Option<PathBuf>),
     /// The user answered whether to move `path` to the trash.

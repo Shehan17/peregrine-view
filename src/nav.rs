@@ -15,7 +15,20 @@ pub fn list_svgs(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn is_svg_name(path: &Path) -> bool {
+/// True when the folder of `file` has SVGs other than `file`, so Next and
+/// Previous have somewhere to go.
+pub fn has_others(file: &Path) -> bool {
+    let Some(dir) = file.parent() else { return false };
+    match list_svgs(dir) {
+        Ok(files) => files.iter().any(|f| f.file_name() != file.file_name()),
+        Err(e) => {
+            eprintln!("could not list {}: {e}", dir.display());
+            false
+        }
+    }
+}
+
+pub fn is_svg_name(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("svg") || e.eq_ignore_ascii_case("svgz"))
@@ -143,6 +156,13 @@ mod tests {
         }
         let files = list_svgs(&dir).unwrap();
         assert_eq!(names(&files), ["a.svgz", "a9.svg", "a10.svg", "b.SVG"]);
+        assert!(has_others(&dir.join("a9.svg")));
+        for name in ["a.svgz", "a10.svg", "b.SVG"] {
+            std::fs::remove_file(dir.join(name)).unwrap();
+        }
+        assert!(!has_others(&dir.join("a9.svg")));
+        // A file that was just deleted still counts the ones left.
+        assert!(has_others(&dir.join("gone.svg")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

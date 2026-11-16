@@ -78,6 +78,11 @@ pub struct App {
     nav_resolving: bool,
     /// Next (+1) and Previous (-1) presses made while picking, done after it.
     nav_queued: i32,
+    /// True when the folder of `nav_path` has other SVGs to go to, which
+    /// shows the Previous and Next buttons.
+    nav_others: bool,
+    /// When to check the folder again, after SVGs in it came or went.
+    folder_check_at: Option<Instant>,
     exit_requested: bool,
     /// The app icon, kept until the window exists if it is ready first.
     icons: Option<IconImages>,
@@ -161,6 +166,8 @@ impl App {
             nav_path: None,
             nav_resolving: false,
             nav_queued: 0,
+            nav_others: false,
+            folder_check_at: None,
             exit_requested: false,
             icons: None,
             text: None,
@@ -257,6 +264,21 @@ impl App {
         }
     }
 
+    /// Checks on a thread whether the folder of `nav_path` has other SVGs.
+    /// The answer comes back as `AppEvent::FolderChecked`.
+    fn check_folder(&mut self) {
+        self.folder_check_at = None;
+        let Some(path) = self.nav_path.clone() else { return };
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new().name("folder-check".into()).spawn(move || {
+            let others = crate::nav::has_others(&path);
+            let _ = proxy.send_event(AppEvent::FolderChecked { path, others });
+        });
+        if let Err(e) = spawned {
+            eprintln!("could not start folder check thread: {e}");
+        }
+    }
+
     /// Puts the app icon on the title bar and the taskbar button.
     fn apply_icons(&mut self) {
         let (Some(gfx), Some(icons)) = (&self.gfx, &self.icons) else { return };
@@ -289,8 +311,13 @@ impl App {
         self.loading = false;
         self.nav_resolving = false;
         self.nav_queued = 0;
-        if path.is_some() {
-            self.nav_path = path;
+        if let Some(path) = path {
+            // Another folder: hide Previous and Next until it has been checked.
+            if self.nav_path.as_ref().and_then(|p| p.parent()) != path.parent() {
+                self.nav_others = false;
+            }
+            self.nav_path = Some(path);
+            self.check_folder();
         }
         let doc = match result {
             Ok(doc) => doc,
@@ -472,7 +499,7 @@ impl App {
             zoom_percent: self.view.scale / self.actual_size_scale() * 100.0,
             background: self.background,
             canvas: self.canvas,
-            nav_enabled: self.nav_path.is_some(),
+            nav_enabled: self.nav_path.is_some() && self.nav_others,
             delete_enabled: self.deletable_path().is_some(),
             edit: self.edit_scene(),
             menu: self.menu_scene(),
@@ -1218,6 +1245,14 @@ impl App {
         }
     }
 
+    fn on_render_failed(&mut self, generation: u64) {
+        if self.in_flight.is_some_and(|(newest, _)| newest == generation) {
+            // Clear it, so the same view can be asked for again.
+            self.in_flight = None;
+            self.show_error("This SVG is too large to draw at this zoom.".into());
+        }
+    }
+
     fn redraw(&mut self) {
         let target = self.target();
         let scene = self.scene();
@@ -1393,6 +1428,14 @@ impl ApplicationHandler<AppEvent> for App {
             }
             AppEvent::Trashed { path, result } => self.on_trashed(path, result),
             AppEvent::Rendered(frame) => self.on_rendered(frame),
+            AppEvent::RenderFailed { generation } => self.on_render_failed(generation),
+            AppEvent::FolderChecked { path, others } => {
+                if self.nav_path.as_ref() == Some(&path) && others != self.nav_others {
+                    self.nav_others = others;
+                    self.request_redraw();
+                }
+            }
+            AppEvent::FolderChanged => self.folder_check_at = Some(Instant::now() + RELOAD_DELAY),
             AppEvent::Icons(icons) => {
                 self.icons = Some(icons);
                 self.apply_icons();
@@ -1454,7 +1497,10 @@ impl ApplicationHandler<AppEvent> for App {
             eprintln!("file changed on disk, reloading");
             self.reload();
         }
-        let next = [self.settle_at, self.banner.as_ref().map(|b| b.until), self.reload_at]
+        if self.folder_check_at.is_some_and(|at| now >= at) {
+            self.check_folder();
+        }
+        let next = [self.settle_at, self.banner.as_ref().map(|b| b.until), self.reload_at, self.folder_check_at]
             .into_iter()
             .flatten()
             .min();

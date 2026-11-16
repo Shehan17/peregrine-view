@@ -4,7 +4,7 @@
 use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use resvg::tiny_skia::Transform;
@@ -165,11 +165,7 @@ fn parse(
     };
     // System fonts are slow to load, so only load them when the SVG has text.
     if text.contains("<text") || text.contains(":text") {
-        let font_start = Instant::now();
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        eprintln!("loaded {} fonts in {:?}", fontdb.len(), font_start.elapsed());
-        options.fontdb = Arc::new(fontdb);
+        options.fontdb = system_fonts();
     }
 
     let tree = usvg::Tree::from_str(text, &options).map_err(|e| match e {
@@ -183,6 +179,21 @@ fn parse(
 
     let (size, base) = picture_size(&tree, &root)?;
     Ok(Document { tree: Arc::new(tree), path, name, file_size: None, size, base })
+}
+
+/// The system fonts, loaded the first time an SVG with text opens and then
+/// shared, so opening or reloading the next one doesn't scan them again.
+fn system_fonts() -> Arc<usvg::fontdb::Database> {
+    static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+    FONTS
+        .get_or_init(|| {
+            let start = Instant::now();
+            let mut fontdb = usvg::fontdb::Database::new();
+            fontdb.load_system_fonts();
+            eprintln!("loaded {} fonts in {:?}", fontdb.len(), start.elapsed());
+            Arc::new(fontdb)
+        })
+        .clone()
 }
 
 /// Applies the spec's size rules on top of the size usvg worked out.
