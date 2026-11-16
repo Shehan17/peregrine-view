@@ -258,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn limits_follow_the_spec() {
+    fn limits_cap_zoom() {
         // Small icon: 512x of 100% (at scale factor 2) is the cap.
         let l = limits((24.0, 24.0), 30.0, 2.0);
         assert!(approx(l.max, 1024.0));

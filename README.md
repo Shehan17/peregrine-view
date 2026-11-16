@@ -78,7 +78,7 @@ cargo test
 
 ## Scope
 
-PeregrineView is a viewer only. It doesn't edit SVGs, run scripts or play animations. Keeping it small is what keeps it fast. [SPEC.md](docs/SPEC.md) has the full design and targets.
+PeregrineView is a viewer only. It doesn't edit SVGs, run scripts or play animations. Keeping it small is what keeps it fast. [CONTRIBUTING.md](CONTRIBUTING.md) has the speed targets and how to help.
 
 ## Contact
 

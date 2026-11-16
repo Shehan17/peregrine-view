@@ -1,0 +1,49 @@
+name: Bug report
+description: Something doesn't work, or an SVG doesn't look right.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What went wrong, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to make it happen
+      description: The steps that lead to the problem.
+      placeholder: |
+        1. Open the attached file
+        2. Zoom in to 400%
+        3. ...
+  - type: textarea
+    id: file
+    attributes:
+      label: The SVG file
+      description: If the problem is with one file, attach it here (zip it if GitHub won't take it), or paste its code. Only share files you're allowed to share.
+  - type: input
+    id: version
+    attributes:
+      label: PeregrineView version
+      description: The version from the Releases page, or the commit if you built it yourself.
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: System
+      options:
+        - Windows
+        - macOS
+        - Linux (X11)
+        - Linux (Wayland)
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots, error messages, screen scaling, or anything that might help.

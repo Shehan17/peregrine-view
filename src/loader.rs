@@ -1,5 +1,5 @@
 //! Reads an SVG and parses it into a usvg tree on a background thread.
-//! Handles gzip, text encodings and the spec's size rules.
+//! Handles gzip, text encodings and the size rules listed in CONTRIBUTING.md.
 
 use std::fmt;
 use std::io::Read;
@@ -192,7 +192,7 @@ fn system_fonts() -> Arc<usvg::fontdb::Database> {
         .clone()
 }
 
-/// Applies the spec's size rules on top of the size usvg worked out.
+/// Applies the size rules (viewBox, content bounds, real units) on top of the size usvg worked out.
 fn picture_size(tree: &usvg::Tree, root: &RootTag) -> Result<((f32, f32), Transform), LoadError> {
     let tree_size = (tree.size().width(), tree.size().height());
     let width_missing = is_missing_length(root.width.as_deref());
