@@ -80,6 +80,10 @@ cargo test
 
 PeregrineView is a viewer only. It doesn't edit SVGs, run scripts or play animations. Keeping it small is what keeps it fast. [SPEC.md](docs/SPEC.md) has the full design and targets.
 
+## Contact
+
+Questions or ideas? Email [shehanrashmika1217@gmail.com](mailto:shehanrashmika1217@gmail.com), or open an issue on [GitHub](https://github.com/Shehan17/peregrine-view/issues).
+
 ## License
 
 PeregrineView is free and unencumbered software released into the public domain under the [Unlicense](LICENSE). Anyone can copy, change, sell or use it for any purpose, commercial or not, with no permission needed and no credit required.
