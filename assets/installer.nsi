@@ -6,6 +6,7 @@
 ; - the uninstaller removes the saved install folder key, Software\<publisher>
 ; - the installer writes the file type keys itself: the open command quotes
 ;   the exe path, and a reinstall keeps the right "before" file type
+; - the file types show the file icon (resource 2 in the exe), not the app icon
 ; - the app is listed in "Open with" through OpenWithProgids
 ; - Explorer is told the file types changed after install and uninstall
 ; Keep it in step with the cargo-packager version in .github/workflows/release.yml.
@@ -515,7 +516,7 @@ Section Install
        ${EndIf}
        WriteRegStr SHCTX "Software\Classes\.{{ext}}" "" "{{or association.name ext}}"
        WriteRegStr SHCTX "Software\Classes\\{{or association.name ext}}" "" "{{association-description association.description ext}}"
-       WriteRegStr SHCTX "Software\Classes\\{{or association.name ext}}\DefaultIcon" "" "$INSTDIR\${MAINBINARYNAME}.exe,0"
+       WriteRegStr SHCTX "Software\Classes\\{{or association.name ext}}\DefaultIcon" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\",-2"
        WriteRegStr SHCTX "Software\Classes\\{{or association.name ext}}\shell" "" "open"
        WriteRegStr SHCTX "Software\Classes\\{{or association.name ext}}\shell\open" "" "Open with ${PRODUCTNAME}"
        WriteRegStr SHCTX "Software\Classes\\{{or association.name ext}}\shell\open\command" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\" $\"%1$\""
